@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HyperCompress</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script type="module" src="/main.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>HyperCompress</h1>
+      <span class="subtitle">Content-Aware Compression</span>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="compress">Compress</button>
+      <button class="tab" data-tab="decompress">Extract</button>
+      <button class="tab" data-tab="analyze">Analyze</button>
+    </div>
+
+    <div class="panel active" id="compress">
+      <div class="drop-zone" id="compress-drop">
+        <div class="drop-icon">⬇</div>
+        <p>Drop file or folder</p>
+        <span class="muted">or click to browse</span>
+      </div>
+      <div class="selected-file" id="compress-file" style="display:none"></div>
+
+      <div class="controls">
+        <div class="field">
+          <label>Level</label>
+          <div class="slider-wrap">
+            <input type="range" id="level" min="1" max="9" value="6" />
+            <span class="slider-val" id="level-val">6</span>
+          </div>
+          <div class="slider-labels"><span>Fast</span><span>Best</span></div>
+        </div>
+
+        <div class="field">
+          <label>Password <span class="muted">(optional)</span></label>
+          <input type="password" id="encrypt-pw" placeholder="AES-256 encryption" />
+        </div>
+      </div>
+
+      <button class="btn primary" id="compress-btn" disabled>Compress</button>
+
+      <div class="result" id="compress-result"></div>
+    </div>
+
+    <div class="panel" id="decompress">
+      <div class="drop-zone" id="decompress-drop">
+        <div class="drop-icon">⬆</div>
+        <p>Drop .hc file</p>
+        <span class="muted">or click to browse</span>
+      </div>
+      <div class="selected-file" id="decompress-file" style="display:none"></div>
+
+      <div class="controls">
+        <div class="field">
+          <label>Password <span class="muted">(if encrypted)</span></label>
+          <input type="password" id="decrypt-pw" placeholder="Decryption password" />
+        </div>
+      </div>
+
+      <button class="btn primary" id="decompress-btn" disabled>Extract</button>
+
+      <div class="result" id="decompress-result"></div>
+    </div>
+
+    <div class="panel" id="analyze">
+      <div class="drop-zone" id="analyze-drop">
+        <div class="drop-icon">◎</div>
+        <p>Drop file to analyze</p>
+        <span class="muted">or click to browse</span>
+      </div>
+      <div class="selected-file" id="analyze-file" style="display:none"></div>
+
+      <button class="btn primary" id="analyze-btn" disabled>Analyze</button>
+
+      <div class="result" id="analyze-result"></div>
+    </div>
+
+    <div class="status" id="status"></div>
+  </div>
+</body>
+</html>

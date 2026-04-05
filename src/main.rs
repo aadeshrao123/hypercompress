@@ -28,6 +28,9 @@ enum Commands {
         /// Compression level 1-9 (1=fastest, 6=default, 9=best)
         #[arg(short, long, default_value = "6")]
         level: u32,
+        /// Encrypt with password (AES-256-GCM)
+        #[arg(short, long)]
+        password: Option<String>,
     },
     /// Decompress a .hc file (auto-extracts folders)
     #[command(alias = "d")]
@@ -35,6 +38,9 @@ enum Commands {
         input: PathBuf,
         /// Output file or folder (default: strip .hc extension)
         output: Option<PathBuf>,
+        /// Decryption password
+        #[arg(short, long)]
+        password: Option<String>,
     },
     /// Analyze a file's data characteristics
     #[command(alias = "a")]
@@ -62,11 +68,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Compress { input, output, level } => {
+        Commands::Compress { input, output, level, password } => {
             hypercompress::compress::set_level(level);
-            cmd_compress(input, output)
+            cmd_compress(input, output, password)
         }
-        Commands::Decompress { input, output } => cmd_decompress(input, output),
+        Commands::Decompress { input, output, password } => cmd_decompress(input, output, password),
         Commands::Analyze { input } => cmd_analyze(input),
         Commands::Info { input } => cmd_info(input),
         Commands::List { input } => cmd_list(input),
@@ -84,7 +90,7 @@ fn fmt_mb(bytes: u64) -> String {
     format!("{:.2} MB", bytes as f64 / 1_048_576.0)
 }
 
-fn cmd_compress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
+fn cmd_compress(input: PathBuf, output: Option<PathBuf>, password: Option<String>) -> Result<()> {
     let output = output.unwrap_or_else(|| default_output(&input));
     println!("HyperCompress v{}", env!("CARGO_PKG_VERSION"));
 
@@ -112,17 +118,25 @@ fn cmd_compress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
         println!();
 
         let start = Instant::now();
-        let file = fs::File::create(&output).with_context(|| format!("failed to create {}", output.display()))?;
-        let mut writer = BufWriter::new(file);
-        hypercompress::compress::compress(&data, &mut writer).context("compression failed")?;
-        drop(writer);
+        let mut compressed = Vec::new();
+        hypercompress::compress::compress(&data, &mut compressed).context("compression failed")?;
 
-        let out_size = fs::metadata(&output)?.len();
+        let final_data = if let Some(ref pw) = password {
+            println!("Encrypting with AES-256-GCM...");
+            hypercompress::crypto::encrypt(&compressed, pw)
+        } else {
+            compressed
+        };
+
+        fs::write(&output, &final_data)?;
+
+        let out_size = final_data.len() as u64;
         let elapsed = start.elapsed();
 
         println!("Output:      {}", output.display());
         println!("Compressed:  {} bytes ({})", out_size, fmt_mb(out_size));
         println!("Ratio:       {:.2}:1 ({:.1}%)", data.len() as f64 / out_size as f64, out_size as f64 / data.len() as f64 * 100.0);
+        if password.is_some() { println!("Encrypted:   AES-256-GCM"); }
         println!("Speed:       {:.1} MB/s", data.len() as f64 / elapsed.as_secs_f64() / 1_048_576.0);
         println!("Time:        {:.3}s", elapsed.as_secs_f64());
     }
@@ -130,12 +144,36 @@ fn cmd_compress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_decompress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
+fn cmd_decompress(input: PathBuf, output: Option<PathBuf>, password: Option<String>) -> Result<()> {
     println!("HyperCompress v{}", env!("CARGO_PKG_VERSION"));
     println!("Decompressing: {}", input.display());
     println!();
 
     let start = Instant::now();
+
+    // Handle encrypted archives — try decryption first
+    if let Some(ref pw) = password {
+        let raw = fs::read(&input)?;
+        let decrypted = hypercompress::crypto::decrypt(&raw, pw)
+            .map_err(|e| anyhow::anyhow!("decryption failed: {}", e))?;
+        println!("Decrypted OK (AES-256-GCM)");
+
+        let output = output.unwrap_or_else(|| {
+            let name = input.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let clean = name.strip_suffix(".hc").unwrap_or(&name);
+            input.parent().unwrap_or(&input).join(clean)
+        });
+
+        let mut cursor = Cursor::new(&decrypted);
+        let data = hypercompress::decompress::decompress(&mut cursor)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let elapsed = start.elapsed();
+        fs::write(&output, &data)?;
+        println!("Output:  {} ({} bytes)", output.display(), data.len());
+        println!("Time:    {:.3}s", elapsed.as_secs_f64());
+        return Ok(());
+    }
 
     if hypercompress::archive::is_archive_file(&input) {
         let output_dir = output.unwrap_or_else(|| {

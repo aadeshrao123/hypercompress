@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod chunk;
+pub mod crypto;
 pub mod compress;
 pub mod decompress;
 pub mod dictionary;
