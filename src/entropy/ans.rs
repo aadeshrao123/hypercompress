@@ -1,17 +1,15 @@
 /// rANS (range Asymmetric Numeral Systems) entropy coder.
 ///
-/// Near-optimal entropy coding (within ~0.01 bits of Shannon entropy)
-/// at table-lookup speed. Patent-free, SIMD-friendly.
+/// Near-optimal entropy coding at table-lookup speed. Patent-free.
+/// This version uses sparse frequency table encoding to minimize overhead.
 ///
-/// This implementation uses 32-bit state with 16-bit renormalization.
-///
-/// Format: [4-byte original_len] [256×4-byte frequency table] [encoded_data]
+/// Format: [4-byte original_len] [sparse_freq_table] [4-byte state] [encoded_data]
+/// Sparse table: [1-byte num_symbols] then for each: [1-byte symbol] [2-byte freq]
 
-const RANS_BYTE_L: u32 = 1 << 23; // Lower bound of state
+const RANS_BYTE_L: u32 = 1 << 23;
 const PROB_BITS: u32 = 14;
 const PROB_SCALE: u32 = 1 << PROB_BITS;
 
-/// Encode data using rANS.
 pub fn encode(data: &[u8]) -> Vec<u8> {
     if data.is_empty() {
         return vec![0, 0, 0, 0];
@@ -23,7 +21,6 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
         freqs[b as usize] += 1;
     }
 
-    // Normalize frequencies to sum to PROB_SCALE
     let normalized = normalize_freqs(&freqs, data.len());
 
     // Build cumulative frequency table
@@ -32,7 +29,7 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
         cum_freqs[i + 1] = cum_freqs[i] + normalized[i];
     }
 
-    // Encode in reverse order (ANS is LIFO)
+    // Encode in reverse (ANS is LIFO)
     let mut state: u32 = RANS_BYTE_L;
     let mut output_bytes: Vec<u8> = Vec::with_capacity(data.len());
 
@@ -42,35 +39,43 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
         let start = cum_freqs[s];
 
         if freq == 0 {
-            // Symbol shouldn't appear if freq is 0, but handle gracefully
             continue;
         }
 
-        // Renormalize: push bytes out if state is too large
+        // Renormalize
         while state >= (RANS_BYTE_L >> PROB_BITS) * freq << 8 {
             output_bytes.push((state & 0xFF) as u8);
             state >>= 8;
         }
 
-        // Encode symbol
         state = (state / freq) * PROB_SCALE + (state % freq) + start;
     }
 
-    // Flush final state (4 bytes)
-    let mut result = Vec::with_capacity(4 + 256 * 4 + output_bytes.len() + 4);
+    // Build result with sparse frequency table
+    let mut result = Vec::with_capacity(4 + 256 * 3 + output_bytes.len() + 4);
 
-    // Header: original length
+    // Original length
     result.extend_from_slice(&(data.len() as u32).to_le_bytes());
 
-    // Frequency table (needed for decoding)
-    for &f in &normalized {
-        result.extend_from_slice(&f.to_le_bytes());
+    // Sparse frequency table: only store non-zero entries
+    let non_zero: Vec<(u8, u16)> = normalized
+        .iter()
+        .enumerate()
+        .filter(|(_, &f)| f > 0)
+        .map(|(i, &f)| (i as u8, f as u16))
+        .collect();
+
+    // Use u16 for count to support up to 65535 symbols (we'll only have ≤256)
+    result.extend_from_slice(&(non_zero.len() as u16).to_le_bytes());
+    for &(sym, freq) in &non_zero {
+        result.push(sym);
+        result.extend_from_slice(&freq.to_le_bytes());
     }
 
     // Final state
     result.extend_from_slice(&state.to_le_bytes());
 
-    // Encoded bytes (in reverse since we built them backwards)
+    // Encoded bytes (reversed)
     for &b in output_bytes.iter().rev() {
         result.push(b);
     }
@@ -78,11 +83,8 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Decode rANS-encoded data.
 pub fn decode(data: &[u8]) -> Vec<u8> {
-    let header_size = 4 + 256 * 4 + 4; // original_len + freq_table + state
-
-    if data.len() < header_size {
+    if data.len() < 4 {
         return Vec::new();
     }
 
@@ -91,16 +93,24 @@ pub fn decode(data: &[u8]) -> Vec<u8> {
         return Vec::new();
     }
 
-    // Read frequency table
+    let mut pos = 4;
+
+    // Read sparse frequency table
+    if pos + 2 > data.len() {
+        return Vec::new();
+    }
+    let num_symbols = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2;
+
     let mut normalized = [0u32; 256];
-    for i in 0..256 {
-        let offset = 4 + i * 4;
-        normalized[i] = u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
+    for _ in 0..num_symbols {
+        if pos + 3 > data.len() {
+            return Vec::new();
+        }
+        let sym = data[pos] as usize;
+        let freq = u16::from_le_bytes([data[pos + 1], data[pos + 2]]) as u32;
+        normalized[sym] = freq;
+        pos += 3;
     }
 
     // Build cumulative frequency table
@@ -109,7 +119,7 @@ pub fn decode(data: &[u8]) -> Vec<u8> {
         cum_freqs[i + 1] = cum_freqs[i] + normalized[i];
     }
 
-    // Build lookup table for fast symbol finding
+    // Build lookup table
     let mut sym_table = vec![0u8; PROB_SCALE as usize];
     for s in 0..256u16 {
         let start = cum_freqs[s as usize] as usize;
@@ -122,21 +132,18 @@ pub fn decode(data: &[u8]) -> Vec<u8> {
     }
 
     // Read initial state
-    let state_offset = 4 + 256 * 4;
-    let mut state = u32::from_le_bytes([
-        data[state_offset],
-        data[state_offset + 1],
-        data[state_offset + 2],
-        data[state_offset + 3],
-    ]);
+    if pos + 4 > data.len() {
+        return Vec::new();
+    }
+    let mut state = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+    pos += 4;
 
-    let encoded = &data[header_size..];
+    let encoded = &data[pos..];
     let mut enc_pos = 0;
 
     let mut result = Vec::with_capacity(original_len);
 
     for _ in 0..original_len {
-        // Find symbol
         let slot = (state % PROB_SCALE) as usize;
         if slot >= sym_table.len() {
             break;
@@ -152,16 +159,15 @@ pub fn decode(data: &[u8]) -> Vec<u8> {
             break;
         }
 
-        // Decode step
         state = freq * (state / PROB_SCALE) + (state % PROB_SCALE) - start;
 
-        // Renormalize: read bytes in if state is too small
+        // Renormalize
         while state < RANS_BYTE_L {
             if enc_pos < encoded.len() {
                 state = (state << 8) | encoded[enc_pos] as u32;
                 enc_pos += 1;
             } else {
-                state = state << 8;
+                state <<= 8;
             }
         }
     }
@@ -169,8 +175,6 @@ pub fn decode(data: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Normalize raw frequencies to sum to PROB_SCALE.
-/// Ensures no symbol with count > 0 gets frequency 0.
 fn normalize_freqs(raw: &[u32; 256], total: usize) -> [u32; 256] {
     let mut result = [0u32; 256];
     let mut assigned = 0u32;
@@ -179,17 +183,14 @@ fn normalize_freqs(raw: &[u32; 256], total: usize) -> [u32; 256] {
     for i in 0..256 {
         if raw[i] > 0 {
             num_nonzero += 1;
-            // Scale proportionally
             let f = ((raw[i] as u64 * PROB_SCALE as u64) / total as u64) as u32;
-            result[i] = f.max(1); // Ensure at least 1
+            result[i] = f.max(1);
             assigned += result[i];
         }
     }
 
-    // Adjust to exactly sum to PROB_SCALE
     if assigned != PROB_SCALE && num_nonzero > 0 {
         let diff = PROB_SCALE as i64 - assigned as i64;
-        // Add/subtract from the most frequent symbol
         let max_idx = raw
             .iter()
             .enumerate()
@@ -225,10 +226,8 @@ mod tests {
         let encoded = encode(&data);
         let decoded = decode(&encoded);
         assert_eq!(decoded, data);
-
-        // Should compress significantly (single symbol → near 0 bits each)
-        // Note: overhead includes 1028-byte header (4 len + 1024 freq table + 4 state)
-        assert!(encoded.len() < 1100);
+        // Sparse table: 4 (len) + 2 (count) + 3 (1 symbol) + 4 (state) + data ≈ ~20 bytes
+        assert!(encoded.len() < 100, "encoded len={}", encoded.len());
     }
 
     #[test]
@@ -243,6 +242,23 @@ mod tests {
     fn test_roundtrip_larger() {
         let data: Vec<u8> = (0..10000).map(|i| (i % 10) as u8).collect();
         let encoded = encode(&data);
+        let decoded = decode(&encoded);
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_compression_ratio() {
+        // Highly skewed distribution should compress well
+        let mut data = vec![0u8; 9000];
+        data.extend_from_slice(&vec![1u8; 1000]);
+        let encoded = encode(&data);
+        // Entropy ≈ 0.469 bits/byte → ~587 bytes ideal. Allow some overhead.
+        assert!(
+            encoded.len() < 2000,
+            "Expected good compression, got {} bytes for {} input",
+            encoded.len(),
+            data.len()
+        );
         let decoded = decode(&encoded);
         assert_eq!(decoded, data);
     }

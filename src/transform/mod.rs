@@ -1,26 +1,31 @@
+pub mod bcj;
 pub mod bitplane;
 pub mod bwt;
 pub mod delta;
 pub mod float_split;
+pub mod mtf;
+pub mod prediction;
 pub mod rle;
+pub mod struct_split;
 pub mod transpose;
+pub mod zero_rle;
 
 use crate::format::{DataType, TransformType};
 
 /// Select the best transform for a given data type.
 pub fn select_transform(data_type: DataType) -> TransformType {
     match data_type {
-        DataType::Text => TransformType::Bwt,
-        DataType::Structured => TransformType::Transpose,
-        DataType::Binary => TransformType::None, // LZ handles this in entropy layer
-        DataType::NumericInt => TransformType::Delta,
+        DataType::Text => TransformType::BwtMtf,
+        DataType::Structured => TransformType::BwtMtf,
+        DataType::Binary => TransformType::Prediction,
+        DataType::NumericInt => TransformType::StructSplit,
         DataType::NumericFloat => TransformType::FloatSplit,
         DataType::CompressedOrRandom => TransformType::None,
         DataType::Sparse => TransformType::Rle,
     }
 }
 
-/// Apply the selected transform to data. Returns transformed data.
+/// Apply the selected transform to data.
 pub fn apply_transform(data: &[u8], transform: TransformType) -> Vec<u8> {
     match transform {
         TransformType::None => data.to_vec(),
@@ -30,10 +35,25 @@ pub fn apply_transform(data: &[u8], transform: TransformType) -> Vec<u8> {
         TransformType::Transpose => transpose::encode(data),
         TransformType::Rle => rle::encode(data),
         TransformType::BitPlane => bitplane::encode(data),
+        TransformType::BwtMtf => {
+            let bwt_out = bwt::forward(data);
+            if bwt_out.len() <= 4 {
+                return bwt_out;
+            }
+            let mut result = Vec::with_capacity(bwt_out.len());
+            result.extend_from_slice(&bwt_out[..4]);
+            let mtf_out = mtf::encode(&bwt_out[4..]);
+            let zrle_out = zero_rle::encode(&mtf_out);
+            result.extend_from_slice(&zrle_out);
+            result
+        }
+        TransformType::Prediction => prediction::encode(data),
+        TransformType::StructSplit => struct_split::encode(data),
+        TransformType::Bcj => bcj::encode(data),
     }
 }
 
-/// Reverse the transform. Returns original data.
+/// Reverse the transform.
 pub fn reverse_transform(data: &[u8], transform: TransformType) -> Vec<u8> {
     match transform {
         TransformType::None => data.to_vec(),
@@ -43,5 +63,20 @@ pub fn reverse_transform(data: &[u8], transform: TransformType) -> Vec<u8> {
         TransformType::Transpose => transpose::decode(data),
         TransformType::Rle => rle::decode(data),
         TransformType::BitPlane => bitplane::decode(data),
+        TransformType::BwtMtf => {
+            if data.len() <= 4 {
+                return bwt::inverse(data);
+            }
+            let bwt_header = &data[..4];
+            let zrle_decoded = zero_rle::decode(&data[4..]);
+            let mtf_decoded = mtf::decode(&zrle_decoded);
+            let mut bwt_data = Vec::with_capacity(4 + mtf_decoded.len());
+            bwt_data.extend_from_slice(bwt_header);
+            bwt_data.extend_from_slice(&mtf_decoded);
+            bwt::inverse(&bwt_data)
+        }
+        TransformType::Prediction => prediction::decode(data),
+        TransformType::StructSplit => struct_split::decode(data),
+        TransformType::Bcj => bcj::decode(data),
     }
 }

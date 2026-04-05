@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod chunk;
 pub mod compress;
 pub mod decompress;

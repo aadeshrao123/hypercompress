@@ -10,7 +10,7 @@ use std::time::Instant;
     name = "hypercompress",
     about = "HyperCompress — Autonomous Content-Aware Compression Engine",
     version,
-    long_about = "World's first compressor that auto-detects data types within a file\nand applies optimal compression strategies per chunk.\n\nFile format: .hc"
+    long_about = "World's first compressor that auto-detects data types within files\nand applies optimal compression strategies per chunk.\n\nSupports files AND folders — just like WinRAR or 7-Zip.\n\nFile format: .hc"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -19,20 +19,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compress a file to .hc format
+    /// Compress a file or folder to .hc format
     #[command(alias = "c")]
     Compress {
-        /// Input file to compress
+        /// Input file or folder to compress
         input: PathBuf,
-        /// Output .hc file (default: input.hc)
+        /// Output .hc file (default: input_name.hc)
         output: Option<PathBuf>,
     },
-    /// Decompress a .hc file
+    /// Decompress a .hc file (auto-extracts folders)
     #[command(alias = "d")]
     Decompress {
         /// Input .hc file
         input: PathBuf,
-        /// Output file (default: strip .hc extension)
+        /// Output file or folder (default: strip .hc extension)
         output: Option<PathBuf>,
     },
     /// Analyze a file and show what HyperCompress detects
@@ -46,6 +46,12 @@ enum Commands {
         /// .hc file to inspect
         input: PathBuf,
     },
+    /// List contents of a .hc archive
+    #[command(alias = "l")]
+    List {
+        /// .hc archive to list
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -56,29 +62,63 @@ fn main() -> Result<()> {
         Commands::Decompress { input, output } => cmd_decompress(input, output),
         Commands::Analyze { input } => cmd_analyze(input),
         Commands::Info { input } => cmd_info(input),
+        Commands::List { input } => cmd_list(input),
     }
 }
 
 fn cmd_compress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
+    let is_dir = input.is_dir();
+
+    // Default output: input_name.hc (strip trailing slash for folders)
     let output = output.unwrap_or_else(|| {
-        let mut p = input.clone();
-        let name = format!(
-            "{}.hc",
-            p.file_name().unwrap_or_default().to_string_lossy()
-        );
-        p.set_file_name(name);
-        p
+        let name = input
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let clean_name = name.trim_end_matches('/').trim_end_matches('\\');
+        input
+            .parent()
+            .unwrap_or(&input)
+            .join(format!("{}.hc", clean_name))
     });
 
-    let data = fs::read(&input).with_context(|| format!("failed to read {}", input.display()))?;
-
     println!("HyperCompress v{}", env!("CARGO_PKG_VERSION"));
-    println!("Compressing: {}", input.display());
-    println!(
-        "Input size:  {} bytes ({:.2} MB)",
-        data.len(),
-        data.len() as f64 / 1_048_576.0
-    );
+
+    let data = if is_dir {
+        // FOLDER MODE: archive the folder first, then compress
+        let (file_count, total_size) = hypercompress::archive::archive_stats(&input)
+            .with_context(|| format!("failed to read {}", input.display()))?;
+
+        println!(
+            "Archiving:   {} ({} files, {:.2} MB)",
+            input.display(),
+            file_count,
+            total_size as f64 / 1_048_576.0
+        );
+
+        let blob = hypercompress::archive::pack(&input)
+            .with_context(|| format!("failed to archive {}", input.display()))?;
+
+        println!(
+            "Archive:     {} bytes ({:.2} MB)",
+            blob.len(),
+            blob.len() as f64 / 1_048_576.0
+        );
+        blob
+    } else {
+        // FILE MODE: read the file directly
+        let data =
+            fs::read(&input).with_context(|| format!("failed to read {}", input.display()))?;
+        println!("Compressing: {}", input.display());
+        println!(
+            "Input size:  {} bytes ({:.2} MB)",
+            data.len(),
+            data.len() as f64 / 1_048_576.0
+        );
+        data
+    };
+
     println!();
 
     let start = Instant::now();
@@ -90,6 +130,8 @@ fn cmd_compress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
     let stats =
         hypercompress::compress::compress(&data, &mut writer).context("compression failed")?;
 
+    drop(writer); // flush
+    let output_size = fs::metadata(&output)?.len();
     let elapsed = start.elapsed();
     let speed = data.len() as f64 / elapsed.as_secs_f64() / 1_048_576.0;
 
@@ -97,59 +139,33 @@ fn cmd_compress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
     println!("Output:      {}", output.display());
     println!(
         "Compressed:  {} bytes ({:.2} MB)",
-        stats.compressed_size,
-        stats.compressed_size as f64 / 1_048_576.0
+        output_size,
+        output_size as f64 / 1_048_576.0
     );
     println!(
         "Ratio:       {:.2}:1 ({:.1}% of original)",
-        stats.ratio(),
-        100.0 / stats.ratio()
+        data.len() as f64 / output_size as f64,
+        output_size as f64 / data.len() as f64 * 100.0
     );
     println!("Speed:       {:.1} MB/s", speed);
     println!("Time:        {:.3}s", elapsed.as_secs_f64());
-    println!();
-    println!("Chunk analysis ({} chunks):", stats.chunk_count);
-    if stats.text_chunks > 0 {
-        println!("  Text:          {} chunks", stats.text_chunks);
-    }
-    if stats.structured_chunks > 0 {
-        println!("  Structured:    {} chunks", stats.structured_chunks);
-    }
-    if stats.binary_chunks > 0 {
-        println!("  Binary:        {} chunks", stats.binary_chunks);
-    }
-    if stats.numeric_int_chunks > 0 {
-        println!("  Numeric (int): {} chunks", stats.numeric_int_chunks);
-    }
-    if stats.numeric_float_chunks > 0 {
-        println!("  Numeric (flt): {} chunks", stats.numeric_float_chunks);
-    }
-    if stats.random_chunks > 0 {
-        println!("  Random/Compr:  {} chunks", stats.random_chunks);
-    }
-    if stats.sparse_chunks > 0 {
-        println!("  Sparse:        {} chunks", stats.sparse_chunks);
+
+    if stats.chunk_count > 1 {
+        println!();
+        println!("Chunk analysis ({} chunks):", stats.chunk_count);
+        if stats.text_chunks > 0 { println!("  Text:          {} chunks", stats.text_chunks); }
+        if stats.structured_chunks > 0 { println!("  Structured:    {} chunks", stats.structured_chunks); }
+        if stats.binary_chunks > 0 { println!("  Binary:        {} chunks", stats.binary_chunks); }
+        if stats.numeric_int_chunks > 0 { println!("  Numeric (int): {} chunks", stats.numeric_int_chunks); }
+        if stats.numeric_float_chunks > 0 { println!("  Numeric (flt): {} chunks", stats.numeric_float_chunks); }
+        if stats.random_chunks > 0 { println!("  Random/Compr:  {} chunks", stats.random_chunks); }
+        if stats.sparse_chunks > 0 { println!("  Sparse:        {} chunks", stats.sparse_chunks); }
     }
 
     Ok(())
 }
 
 fn cmd_decompress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
-    let output = output.unwrap_or_else(|| {
-        let mut p = input.clone();
-        let name = input
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        if let Some(stripped) = name.strip_suffix(".hc") {
-            p.set_file_name(stripped);
-        } else {
-            p.set_file_name(format!("{}.out", name));
-        }
-        p
-    });
-
     let compressed =
         fs::read(&input).with_context(|| format!("failed to read {}", input.display()))?;
 
@@ -165,12 +181,51 @@ fn cmd_decompress(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
     let elapsed = start.elapsed();
     let speed = data.len() as f64 / elapsed.as_secs_f64() / 1_048_576.0;
 
-    fs::write(&output, &data).with_context(|| format!("failed to write {}", output.display()))?;
+    // Check if the decompressed data is an archive
+    if hypercompress::archive::is_archive(&data) {
+        // FOLDER MODE: extract the archive
+        let output_dir = output.unwrap_or_else(|| {
+            let name = input
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let clean = name.strip_suffix(".hc").unwrap_or(&name);
+            input.parent().unwrap_or(&input).join(clean)
+        });
 
-    println!("Decompression complete!");
-    println!("Output:  {} ({} bytes)", output.display(), data.len());
-    println!("Speed:   {:.1} MB/s", speed);
-    println!("Time:    {:.3}s", elapsed.as_secs_f64());
+        let entries = hypercompress::archive::unpack(&data, &output_dir)
+            .map_err(|e| anyhow::anyhow!("archive extraction failed: {}", e))?;
+
+        println!("Extracted {} files to {}", entries.len(), output_dir.display());
+        println!("Speed:   {:.1} MB/s", speed);
+        println!("Time:    {:.3}s", elapsed.as_secs_f64());
+    } else {
+        // FILE MODE: write single file
+        let output = output.unwrap_or_else(|| {
+            let name = input
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if let Some(stripped) = name.strip_suffix(".hc") {
+                input.parent().unwrap_or(&input).join(stripped)
+            } else {
+                input
+                    .parent()
+                    .unwrap_or(&input)
+                    .join(format!("{}.out", name))
+            }
+        });
+
+        fs::write(&output, &data)
+            .with_context(|| format!("failed to write {}", output.display()))?;
+
+        println!("Decompression complete!");
+        println!("Output:  {} ({} bytes)", output.display(), data.len());
+        println!("Speed:   {:.1} MB/s", speed);
+        println!("Time:    {:.3}s", elapsed.as_secs_f64());
+    }
 
     Ok(())
 }
@@ -196,34 +251,6 @@ fn cmd_analyze(input: PathBuf) -> Result<()> {
     println!("  Avg delta:    {:.1}", fp.avg_delta);
     println!("  UTF-8 ratio:  {:.1}%", fp.utf8_ratio * 100.0);
     println!("  Detected type: {:?}", fp.classify());
-    println!();
-
-    let mut chunks =
-        hypercompress::chunk::split_into_chunks(&data, hypercompress::chunk::DEFAULT_CHUNK_SIZE);
-    hypercompress::fingerprint::fingerprint_chunks(&mut chunks);
-
-    println!(
-        "Per-chunk analysis ({} chunks of ~{}KB):",
-        chunks.len(),
-        hypercompress::chunk::DEFAULT_CHUNK_SIZE / 1024
-    );
-    println!(
-        "{:<8} {:<10} {:<18} {:<10} {:<10}",
-        "Chunk", "Offset", "Type", "Entropy", "ASCII%"
-    );
-    println!("{}", "-".repeat(60));
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let fp = hypercompress::fingerprint::Fingerprint::compute(&chunk.data);
-        println!(
-            "{:<8} {:<10} {:<18} {:<10.3} {:<10.1}",
-            i,
-            chunk.original_offset,
-            format!("{:?}", chunk.data_type),
-            fp.entropy,
-            fp.ascii_ratio * 100.0,
-        );
-    }
 
     Ok(())
 }
@@ -273,6 +300,71 @@ fn cmd_info(input: PathBuf) -> Result<()> {
             );
         }
     }
+
+    Ok(())
+}
+
+fn cmd_list(input: PathBuf) -> Result<()> {
+    let compressed =
+        fs::read(&input).with_context(|| format!("failed to read {}", input.display()))?;
+
+    let mut cursor = Cursor::new(&compressed);
+    let data = hypercompress::decompress::decompress(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if !hypercompress::archive::is_archive(&data) {
+        println!("{} is a single compressed file, not an archive.", input.display());
+        return Ok(());
+    }
+
+    // Parse archive directory without extracting
+    let file_count =
+        u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let mut pos = 8;
+
+    println!(
+        "Archive: {} ({} files)",
+        input.display(),
+        file_count
+    );
+    println!();
+    println!("{:<50} {:>12}", "File", "Size");
+    println!("{}", "-".repeat(64));
+
+    let mut total = 0u64;
+    for _ in 0..file_count {
+        if pos + 2 > data.len() {
+            break;
+        }
+        let path_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + path_len > data.len() {
+            break;
+        }
+        let path = String::from_utf8_lossy(&data[pos..pos + path_len]);
+        pos += path_len;
+        if pos + 8 > data.len() {
+            break;
+        }
+        let size = u64::from_le_bytes([
+            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
+            data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+        ]);
+        pos += 8;
+        total += size;
+        println!("{:<50} {:>12} B", path, size);
+    }
+    println!("{}", "-".repeat(64));
+    println!(
+        "{:<50} {:>12} B",
+        format!("{} files", file_count),
+        total
+    );
+    println!(
+        "Compressed:  {} B  (ratio {:.2}:1)",
+        compressed.len(),
+        total as f64 / compressed.len() as f64
+    );
 
     Ok(())
 }

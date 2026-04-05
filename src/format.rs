@@ -56,6 +56,10 @@ pub enum TransformType {
     Transpose = 4,
     Rle = 5,
     BitPlane = 6,
+    BwtMtf = 7,
+    Prediction = 8,
+    StructSplit = 9,
+    Bcj = 10,
 }
 
 impl TransformType {
@@ -68,6 +72,10 @@ impl TransformType {
             4 => Some(Self::Transpose),
             5 => Some(Self::Rle),
             6 => Some(Self::BitPlane),
+            7 => Some(Self::BwtMtf),
+            8 => Some(Self::Prediction),
+            9 => Some(Self::StructSplit),
+            10 => Some(Self::Bcj),
             _ => None,
         }
     }
@@ -80,6 +88,10 @@ pub enum CodecType {
     Raw = 0,
     Ans = 1,
     Lz = 2,
+    LzAns = 3,
+    Order1 = 4,
+    LzOptimal = 5,
+    Lzma = 6,
 }
 
 impl CodecType {
@@ -88,6 +100,10 @@ impl CodecType {
             0 => Some(Self::Raw),
             1 => Some(Self::Ans),
             2 => Some(Self::Lz),
+            3 => Some(Self::LzAns),
+            4 => Some(Self::Order1),
+            5 => Some(Self::LzOptimal),
+            6 => Some(Self::Lzma),
             _ => None,
         }
     }
