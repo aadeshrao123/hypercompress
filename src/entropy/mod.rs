@@ -127,8 +127,8 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         return (CodecType::Raw, Vec::new());
     }
 
-    let entropy = quick_entropy(data);
-    if entropy > 7.8 {
+    let ent = quick_entropy(data);
+    if ent > 7.8 {
         return (CodecType::Raw, data.to_vec());
     }
 
@@ -140,6 +140,12 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
             best.0 = codec;
             best.1 = encoded;
         }
+    }
+
+    // high entropy: skip our custom codecs, just try LZMA
+    if ent > 6.5 {
+        try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+        return (best.0, best.1);
     }
 
     try_codec(&mut best, CodecType::Ans, ans::encode(data));
@@ -162,9 +168,7 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         try_codec(&mut best, CodecType::LzOptimal, lz_optimal::compress(data));
     }
 
-    if data.len() >= 32 {
-        try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
-    }
+    try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
 
     (best.0, best.1)
 }

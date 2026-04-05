@@ -51,6 +51,20 @@ pub fn compress<W: Write>(data: &[u8], writer: &mut W) -> io::Result<CompressSta
 
 fn try_whole_file_lzma(data: &[u8]) -> Option<(Vec<u8>, usize, TransformType)> {
     let overhead = FileHeader::SIZE + 6;
+
+    let fp = crate::fingerprint::Fingerprint::compute(data);
+    let dtype = fp.classify();
+
+    // fast path: high-entropy or random data — just one LZMA pass, no transforms
+    if dtype == DataType::CompressedOrRandom || fp.entropy > 7.0 {
+        let lzma = entropy::encode(data, CodecType::Lzma);
+        return if lzma.len() < data.len() {
+            Some((lzma, overhead, TransformType::None))
+        } else {
+            None
+        };
+    }
+
     let mut best: Option<(Vec<u8>, TransformType)> = None;
 
     let lzma_raw = entropy::encode(data, CodecType::Lzma);
@@ -58,26 +72,18 @@ fn try_whole_file_lzma(data: &[u8]) -> Option<(Vec<u8>, usize, TransformType)> {
         best = Some((lzma_raw, TransformType::None));
     }
 
-    let fp = crate::fingerprint::Fingerprint::compute(data);
-    let dtype = fp.classify();
-    let primary_tf = transform::select_transform(dtype);
-
-    let mut transforms = vec![primary_tf];
+    // only try transforms that make sense for this data type
+    let mut transforms = vec![transform::select_transform(dtype)];
     if crate::transform::bcj::is_likely_executable(data) {
         transforms.push(TransformType::Bcj);
     }
-    if dtype == DataType::Binary {
+    if dtype == DataType::Binary && fp.entropy < 6.5 {
         transforms.push(TransformType::Precomp);
-    }
-    if dtype == DataType::Binary {
         transforms.push(TransformType::Prediction);
-        transforms.push(TransformType::Delta);
     }
 
     for tf in transforms {
-        if tf == TransformType::None {
-            continue;
-        }
+        if tf == TransformType::None { continue; }
         let transformed = transform::apply_transform(data, tf);
         let lzma_tf = entropy::encode(&transformed, CodecType::Lzma);
         if lzma_tf.len() < best.as_ref().map(|(d, _)| d.len()).unwrap_or(data.len()) {
