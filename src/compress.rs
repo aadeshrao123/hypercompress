@@ -55,10 +55,16 @@ fn try_whole_file_lzma(data: &[u8]) -> Option<(Vec<u8>, usize, TransformType)> {
     let fp = crate::fingerprint::Fingerprint::compute(data);
     let dtype = fp.classify();
 
-    // fast path: high-entropy or random data — just one LZMA pass, no transforms
+    // near-random data: not worth the CPU cost of LZMA for <3% savings
+    if fp.entropy > 7.9 {
+        return None;
+    }
+
+    // high-entropy but not random: one LZMA pass, no transforms
     if dtype == DataType::CompressedOrRandom || fp.entropy > 7.0 {
         let lzma = entropy::encode(data, CodecType::Lzma);
-        return if lzma.len() < data.len() {
+        return if lzma.len() < data.len() * 97 / 100 {
+            // only use LZMA if it saves at least 3%
             Some((lzma, overhead, TransformType::None))
         } else {
             None
