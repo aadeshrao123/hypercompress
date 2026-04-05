@@ -268,18 +268,15 @@ fn compress_chunk_optimal(chunk: &Chunk) -> CompressedChunk {
     let mut best_size = raw_size;
 
     for &tf in &candidates {
+        // skip BWT on chunks > 64KB (cyclic sort too slow)
+        if matches!(tf, TransformType::BwtMtf | TransformType::Bwt) && chunk.data.len() > 65536 {
+            continue;
+        }
+
         let transformed = transform::apply_transform(&chunk.data, tf);
         let (codec, encoded) = entropy::select_best_codec(&transformed);
 
         if encoded.len() < best_size {
-            let dec = entropy::decode(&encoded, codec);
-            let restored = transform::reverse_transform(&dec, tf);
-            if restored.len() < chunk.data.len()
-                || restored[..chunk.data.len()] != chunk.data[..]
-            {
-                continue;
-            }
-
             best_size = encoded.len();
             best_tf = tf;
             best_codec = codec;

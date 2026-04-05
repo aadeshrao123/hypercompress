@@ -51,27 +51,15 @@ fn lzma_compress(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     use xz2::stream::MtStreamBuilder;
 
-    let ascii = data.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count() as f64
-        / data.len().max(1) as f64;
+    // scale preset by data size — big files get faster presets
+    let preset = if data.len() > 4 * 1024 * 1024 { 3 }
+        else if data.len() > 512 * 1024 { 5 }
+        else { 6 };
 
-    // pick lc/lp/pb based on data characteristics
-    let (lc, lp, pb) = if ascii > 0.8 {
-        (3, 0, 0) // text
-    } else if data.len() % 4 == 0 && ascii < 0.3 {
-        (0, 2, 2) // 4-byte aligned binary
-    } else if data.len() % 2 == 0 && ascii < 0.4 {
-        (1, 1, 1) // 2-byte aligned
-    } else {
-        (3, 0, 2) // default
-    };
-
-    // try tuned params
-    let tuned = lzma_with_params(data, 6, lc, lp, pb);
-
-    // try multithreaded default for large data
-    let mt = if data.len() > 256 * 1024 {
-        MtStreamBuilder::new()
-            .preset(6)
+    // large data: use multithreaded encoder (fastest path)
+    if data.len() > 256 * 1024 {
+        if let Some(out) = MtStreamBuilder::new()
+            .preset(preset)
             .threads(num_cpus())
             .encoder()
             .ok()
@@ -80,15 +68,20 @@ fn lzma_compress(data: &[u8]) -> Vec<u8> {
                 enc.write_all(data).ok()?;
                 enc.finish().ok()
             })
-    } else {
-        None
-    };
+        {
+            if out.len() < data.len() { return out; }
+        }
+    }
 
-    // pick smallest
-    let mut best = data.to_vec();
-    if let Some(ref t) = tuned { if t.len() < best.len() { best = t.clone(); } }
-    if let Some(ref m) = mt { if m.len() < best.len() { best = m.clone(); } }
-    best
+    // small data: try tuned params
+    let ascii = data.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count() as f64
+        / data.len().max(1) as f64;
+
+    let (lc, lp, pb) = if ascii > 0.8 { (3, 0, 0) }
+        else if data.len() % 4 == 0 && ascii < 0.3 { (0, 2, 2) }
+        else { (3, 0, 2) };
+
+    lzma_with_params(data, preset, lc, lp, pb).unwrap_or_else(|| data.to_vec())
 }
 
 fn lzma_with_params(data: &[u8], preset: u32, lc: u32, lp: u32, pb: u32) -> Option<Vec<u8>> {
@@ -142,8 +135,8 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         }
     }
 
-    // high entropy: skip our custom codecs, just try LZMA
-    if ent > 6.5 {
+    // medium-high entropy: our transforms already ran, just try LZMA
+    if ent > 5.5 {
         try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
         return (best.0, best.1);
     }
@@ -168,7 +161,10 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         try_codec(&mut best, CodecType::LzOptimal, lz_optimal::compress(data));
     }
 
-    try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+    // only try LZMA (expensive) if fast codecs didn't compress well (<40% reduction)
+    if best.2 > data.len() * 60 / 100 {
+        try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+    }
 
     (best.0, best.1)
 }
