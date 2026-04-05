@@ -303,7 +303,6 @@ fn bench_single_file(path: &PathBuf, _tmp: &std::path::Path) -> Result<()> {
     println!("{:<20} {:>10} {:>8} {:>10}", "Compressor", "Size", "Ratio", "vs best");
     println!("{}", "-".repeat(52));
 
-    let best_other = competitors.iter().map(|(_, s)| *s).min().unwrap_or(orig);
     let all: Vec<(&str, usize)> = std::iter::once(("HyperCompress", compressed.len()))
         .chain(competitors.iter().map(|(n, s)| (*n, *s)))
         .collect();
@@ -338,7 +337,7 @@ fn bench_folder(folder: &PathBuf, tmp: &std::path::Path) -> Result<()> {
 
     // Compress as archive
     let hc_path = tmp.join("bench_archive.hc");
-    let stats = hypercompress::archive::compress_folder(folder, &hc_path)?;
+    hypercompress::archive::compress_folder(folder, &hc_path)?;
 
     // Decompress + verify
     let extract_dir = tmp.join("extracted");
