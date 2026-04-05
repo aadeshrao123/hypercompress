@@ -1,15 +1,16 @@
 use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::entropy;
-use crate::format::{ChunkMeta, FileHeader};
+use crate::format::{ChunkMeta, CodecType, FileHeader, TransformType};
 use crate::transform;
 
-/// Decompress a .hc file from a reader, returning the original data.
 pub fn decompress<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, DecompressError> {
-    // Read header
     let header = FileHeader::read_from(reader).map_err(DecompressError::Format)?;
 
-    // Read the segment map (at end of file) for random-access decompression
+    if header.flags & 1 == 1 {
+        return decompress_single_stream(reader, &header);
+    }
+
     reader.seek(SeekFrom::Start(header.segment_map_offset))?;
 
     let mut metas = Vec::with_capacity(header.chunk_count as usize);
@@ -17,41 +18,66 @@ pub fn decompress<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, DecompressE
         metas.push(ChunkMeta::read_from(reader)?);
     }
 
-    // Decompress each chunk using the segment map
     let mut result = vec![0u8; header.original_size as usize];
 
     for meta in &metas {
         reader.seek(SeekFrom::Start(meta.offset_in_file))?;
 
-        // Skip the per-chunk header (15 bytes: 4+4+1+1+1+4)
         let mut skip = [0u8; 15];
         reader.read_exact(&mut skip)?;
 
-        let mut compressed_data = vec![0u8; meta.compressed_size as usize];
-        reader.read_exact(&mut compressed_data)?;
+        let mut buf = vec![0u8; meta.compressed_size as usize];
+        reader.read_exact(&mut buf)?;
 
-        // Decode: entropy decode -> reverse transform
-        let decoded_entropy = entropy::decode(&compressed_data, meta.codec);
-        let original_data = transform::reverse_transform(&decoded_entropy, meta.transform);
+        let decoded = entropy::decode(&buf, meta.codec);
+        let original = transform::reverse_transform(&decoded, meta.transform);
 
-        // Verify checksum
-        let actual_checksum = xxhash_rust::xxh32::xxh32(&original_data, 0);
-        if actual_checksum != meta.checksum {
+        let actual = xxhash_rust::xxh32::xxh32(&original, 0);
+        if actual != meta.checksum {
             return Err(DecompressError::ChecksumMismatch {
                 expected: meta.checksum,
-                actual: actual_checksum,
+                actual,
             });
         }
 
-        // Copy to output at the correct position
         let start = meta.original_offset as usize;
         let end = start + meta.original_size as usize;
-        if end <= result.len() && original_data.len() >= meta.original_size as usize {
-            result[start..end].copy_from_slice(&original_data[..meta.original_size as usize]);
+        if end <= result.len() && original.len() >= meta.original_size as usize {
+            result[start..end].copy_from_slice(&original[..meta.original_size as usize]);
         }
     }
 
     Ok(result)
+}
+
+fn decompress_single_stream<R: Read>(
+    reader: &mut R,
+    _header: &FileHeader,
+) -> Result<Vec<u8>, DecompressError> {
+    let mut b1 = [0u8; 1];
+    let mut b4 = [0u8; 4];
+
+    reader.read_exact(&mut b1)?;
+    let tf = TransformType::from_u8(b1[0]).unwrap_or(TransformType::None);
+
+    reader.read_exact(&mut b1)?;
+    let codec = CodecType::from_u8(b1[0]).unwrap_or(CodecType::Raw);
+
+    reader.read_exact(&mut b4)?;
+    let expected = u32::from_le_bytes(b4);
+
+    let mut compressed = Vec::new();
+    reader.read_to_end(&mut compressed)?;
+
+    let decoded = entropy::decode(&compressed, codec);
+    let original = transform::reverse_transform(&decoded, tf);
+
+    let actual = xxhash_rust::xxh32::xxh32(&original, 0);
+    if actual != expected {
+        return Err(DecompressError::ChecksumMismatch { expected, actual });
+    }
+
+    Ok(original)
 }
 
 #[derive(Debug)]
@@ -73,11 +99,7 @@ impl std::fmt::Display for DecompressError {
             DecompressError::Format(e) => write!(f, "format error: {}", e),
             DecompressError::Io(e) => write!(f, "io error: {}", e),
             DecompressError::ChecksumMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "checksum mismatch: expected 0x{:08X}, got 0x{:08X}",
-                    expected, actual
-                )
+                write!(f, "checksum mismatch: expected 0x{:08X}, got 0x{:08X}", expected, actual)
             }
         }
     }

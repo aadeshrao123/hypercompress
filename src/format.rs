@@ -1,7 +1,6 @@
 use std::io::{self, Read, Write};
 use thiserror::Error;
 
-/// Magic bytes: "HC\x01\x00"
 pub const MAGIC: [u8; 4] = [b'H', b'C', 0x01, 0x00];
 pub const FORMAT_VERSION: u8 = 1;
 
@@ -17,7 +16,6 @@ pub enum FormatError {
     Io(#[from] io::Error),
 }
 
-/// Data types detected by the fingerprinter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DataType {
@@ -45,7 +43,6 @@ impl DataType {
     }
 }
 
-/// Transform applied before entropy coding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TransformType {
@@ -81,7 +78,6 @@ impl TransformType {
     }
 }
 
-/// Codec used for the final encoding step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CodecType {
@@ -109,7 +105,6 @@ impl CodecType {
     }
 }
 
-/// File header written at the start of every .hc file.
 #[derive(Debug, Clone)]
 pub struct FileHeader {
     pub version: u8,
@@ -139,39 +134,32 @@ impl FileHeader {
             return Err(FormatError::InvalidMagic);
         }
 
-        let mut version = [0u8; 1];
-        r.read_exact(&mut version)?;
-        if version[0] != FORMAT_VERSION {
-            return Err(FormatError::UnsupportedVersion(version[0]));
+        let mut ver = [0u8; 1];
+        r.read_exact(&mut ver)?;
+        if ver[0] != FORMAT_VERSION {
+            return Err(FormatError::UnsupportedVersion(ver[0]));
         }
 
-        let mut buf2 = [0u8; 2];
-        let mut buf4 = [0u8; 4];
-        let mut buf8 = [0u8; 8];
+        let mut b2 = [0u8; 2];
+        let mut b4 = [0u8; 4];
+        let mut b8 = [0u8; 8];
 
-        r.read_exact(&mut buf2)?;
-        let flags = u16::from_le_bytes(buf2);
+        r.read_exact(&mut b2)?;
+        let flags = u16::from_le_bytes(b2);
 
-        r.read_exact(&mut buf8)?;
-        let original_size = u64::from_le_bytes(buf8);
+        r.read_exact(&mut b8)?;
+        let original_size = u64::from_le_bytes(b8);
 
-        r.read_exact(&mut buf4)?;
-        let chunk_count = u32::from_le_bytes(buf4);
+        r.read_exact(&mut b4)?;
+        let chunk_count = u32::from_le_bytes(b4);
 
-        r.read_exact(&mut buf8)?;
-        let segment_map_offset = u64::from_le_bytes(buf8);
+        r.read_exact(&mut b8)?;
+        let segment_map_offset = u64::from_le_bytes(b8);
 
-        Ok(FileHeader {
-            version: version[0],
-            flags,
-            original_size,
-            chunk_count,
-            segment_map_offset,
-        })
+        Ok(FileHeader { version: ver[0], flags, original_size, chunk_count, segment_map_offset })
     }
 }
 
-/// Metadata for a single chunk in the segment map.
 #[derive(Debug, Clone)]
 pub struct ChunkMeta {
     pub offset_in_file: u64,
@@ -200,43 +188,37 @@ impl ChunkMeta {
     }
 
     pub fn read_from<R: Read>(r: &mut R) -> io::Result<Self> {
-        let mut buf8 = [0u8; 8];
-        let mut buf4 = [0u8; 4];
-        let mut buf1 = [0u8; 1];
+        let mut b8 = [0u8; 8];
+        let mut b4 = [0u8; 4];
+        let mut b1 = [0u8; 1];
 
-        r.read_exact(&mut buf8)?;
-        let offset_in_file = u64::from_le_bytes(buf8);
+        r.read_exact(&mut b8)?;
+        let offset_in_file = u64::from_le_bytes(b8);
 
-        r.read_exact(&mut buf8)?;
-        let original_offset = u64::from_le_bytes(buf8);
+        r.read_exact(&mut b8)?;
+        let original_offset = u64::from_le_bytes(b8);
 
-        r.read_exact(&mut buf4)?;
-        let original_size = u32::from_le_bytes(buf4);
+        r.read_exact(&mut b4)?;
+        let original_size = u32::from_le_bytes(b4);
 
-        r.read_exact(&mut buf4)?;
-        let compressed_size = u32::from_le_bytes(buf4);
+        r.read_exact(&mut b4)?;
+        let compressed_size = u32::from_le_bytes(b4);
 
-        r.read_exact(&mut buf1)?;
-        let data_type = DataType::from_u8(buf1[0]).unwrap_or(DataType::Binary);
+        r.read_exact(&mut b1)?;
+        let data_type = DataType::from_u8(b1[0]).unwrap_or(DataType::Binary);
 
-        r.read_exact(&mut buf1)?;
-        let transform = TransformType::from_u8(buf1[0]).unwrap_or(TransformType::None);
+        r.read_exact(&mut b1)?;
+        let transform = TransformType::from_u8(b1[0]).unwrap_or(TransformType::None);
 
-        r.read_exact(&mut buf1)?;
-        let codec = CodecType::from_u8(buf1[0]).unwrap_or(CodecType::Raw);
+        r.read_exact(&mut b1)?;
+        let codec = CodecType::from_u8(b1[0]).unwrap_or(CodecType::Raw);
 
-        r.read_exact(&mut buf4)?;
-        let checksum = u32::from_le_bytes(buf4);
+        r.read_exact(&mut b4)?;
+        let checksum = u32::from_le_bytes(b4);
 
         Ok(ChunkMeta {
-            offset_in_file,
-            original_offset,
-            original_size,
-            compressed_size,
-            data_type,
-            transform,
-            codec,
-            checksum,
+            offset_in_file, original_offset, original_size, compressed_size,
+            data_type, transform, codec, checksum,
         })
     }
 }

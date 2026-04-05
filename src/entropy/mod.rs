@@ -4,7 +4,6 @@ pub mod order1;
 
 use crate::format::CodecType;
 
-/// Encode data using the specified codec.
 pub fn encode(data: &[u8], codec: CodecType) -> Vec<u8> {
     match codec {
         CodecType::Raw => data.to_vec(),
@@ -33,7 +32,6 @@ pub fn encode(data: &[u8], codec: CodecType) -> Vec<u8> {
     }
 }
 
-/// Decode data using the specified codec.
 pub fn decode(data: &[u8], codec: CodecType) -> Vec<u8> {
     match codec {
         CodecType::Raw => data.to_vec(),
@@ -49,7 +47,6 @@ pub fn decode(data: &[u8], codec: CodecType) -> Vec<u8> {
     }
 }
 
-/// LZMA compression via xz2 (liblzma bindings — the real deal).
 fn lzma_compress(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
@@ -61,7 +58,6 @@ fn lzma_compress(data: &[u8]) -> Vec<u8> {
     data.to_vec()
 }
 
-/// LZMA decompression via xz2.
 fn lzma_decompress(data: &[u8]) -> Vec<u8> {
     use std::io::Read;
     let mut decoder = xz2::read::XzDecoder::new(data);
@@ -73,120 +69,81 @@ fn lzma_decompress(data: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Select the best codec for the given (already-transformed) data.
-/// Tries multiple options and returns the one that compresses best.
+/// Try multiple codecs and return whichever compresses smallest.
 pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
     if data.is_empty() {
         return (CodecType::Raw, Vec::new());
     }
 
-    // Quick entropy check — skip everything if data is random
     let entropy = quick_entropy(data);
     if entropy > 7.8 {
         return (CodecType::Raw, data.to_vec());
     }
 
-    let mut best_codec = CodecType::Raw;
-    let mut best_data = data.to_vec();
-    let mut best_size = data.len();
+    let mut best = (CodecType::Raw, data.to_vec(), data.len());
 
-    // Try ANS
-    let ans_out = ans::encode(data);
-    if ans_out.len() < best_size {
-        best_size = ans_out.len();
-        best_codec = CodecType::Ans;
-        best_data = ans_out;
+    fn try_codec(best: &mut (CodecType, Vec<u8>, usize), codec: CodecType, encoded: Vec<u8>) {
+        if encoded.len() < best.2 {
+            best.2 = encoded.len();
+            best.0 = codec;
+            best.1 = encoded;
+        }
     }
 
-    // Try LZ
+    try_codec(&mut best, CodecType::Ans, ans::encode(data));
+
     let lz_out = lz_encode(data);
     let lz_helped = lz_out.len() < data.len();
-    if lz_out.len() < best_size {
-        best_size = lz_out.len();
-        best_codec = CodecType::Lz;
-        best_data = lz_out.clone();
-    }
+    try_codec(&mut best, CodecType::Lz, lz_out.clone());
 
-    // Try LZ+ANS pipeline (best for most data)
     if lz_helped {
-        let lzans_out = ans::encode(&lz_out);
-        if lzans_out.len() < best_size {
-            best_size = lzans_out.len();
-            best_codec = CodecType::LzAns;
-            best_data = lzans_out;
-        }
+        try_codec(&mut best, CodecType::LzAns, ans::encode(&lz_out));
     }
 
-    // Try Order-1 context model (best for structured/text data)
     if data.len() >= 64 {
-        if let Some(o1_out) = order1::encode(data) {
-            if o1_out.len() < best_size {
-                best_size = o1_out.len();
-                best_codec = CodecType::Order1;
-                best_data = o1_out;
-            }
+        if let Some(o1) = order1::encode(data) {
+            try_codec(&mut best, CodecType::Order1, o1);
         }
     }
 
-    // Try optimal-parsing LZ (best overall for binary/mixed data)
     if data.len() >= 32 {
-        let opt_out = lz_optimal::compress(data);
-        if opt_out.len() < best_size {
-            best_size = opt_out.len();
-            best_codec = CodecType::LzOptimal;
-            best_data = opt_out;
-        }
+        try_codec(&mut best, CodecType::LzOptimal, lz_optimal::compress(data));
     }
 
-    // Try LZMA — the heavyweight champion. Our transforms run FIRST,
-    // so LZMA compresses pre-transformed data = better than standalone LZMA.
     if data.len() >= 32 {
-        let lzma_out = lzma_compress(data);
-        if lzma_out.len() < best_size {
-            best_size = lzma_out.len();
-            best_codec = CodecType::Lzma;
-            best_data = lzma_out;
-        }
+        try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
     }
 
-    let _ = best_size;
-    (best_codec, best_data)
+    (best.0, best.1)
 }
 
 fn quick_entropy(data: &[u8]) -> f64 {
-    let mut histogram = [0u32; 256];
+    let mut hist = [0u32; 256];
     for &b in data {
-        histogram[b as usize] += 1;
+        hist[b as usize] += 1;
     }
     let len = data.len() as f64;
-    let mut entropy = 0.0;
-    for &count in &histogram {
-        if count > 0 {
-            let p = count as f64 / len;
-            entropy -= p * p.log2();
+    let mut ent = 0.0;
+    for &c in &hist {
+        if c > 0 {
+            let p = c as f64 / len;
+            ent -= p * p.log2();
         }
     }
-    entropy
+    ent
 }
 
-// ============================================================================
-// Hash-chain LZ77 encoder — O(n) average with fast hash lookups
-// ============================================================================
+// Hash-chain LZ77 encoder.
 //
-// Format: stream of tokens, each starting with a control byte:
-//   Bit 7 = 0: Literal run
-//     Bits 0-6 = literal count - 1 (1..128 literals follow)
-//   Bit 7 = 1: Match
-//     Bits 0-6 + next byte = offset (15-bit, 1..32768)
-//     Next byte = match length - 3 (0..255 → 3..258)
-//
-// This is much more compact than the old flag-per-byte format.
+// Token format (stream of control bytes):
+//   Bit 7 = 0: Literal run, bits 0-6 = count-1 (1..128 literals follow)
+//   Bit 7 = 1: Match, bits 0-6 + next byte = offset (15-bit), next byte = length-3
 
 const HASH_BITS: usize = 18;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 const HASH_MASK: usize = HASH_SIZE - 1;
-const MAX_CHAIN: usize = 256; // deep search for best matches
-const WINDOW_SIZE: usize = 262143; // 18-bit offset — covers 256KB chunks
+const MAX_CHAIN: usize = 256;
+const WINDOW_SIZE: usize = 262143;
 const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = 258;
 
@@ -195,112 +152,81 @@ fn hash4(data: &[u8], pos: usize) -> usize {
         return 0;
     }
     let v = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-    // Knuth multiplicative hash
     ((v.wrapping_mul(2654435761)) >> (32 - HASH_BITS)) as usize & HASH_MASK
+}
+
+/// Find best match at `pos` by walking the hash chain.
+/// Returns (length, offset) or (0, 0) if no match found.
+fn find_match(data: &[u8], pos: usize, head: &[u32], chain: &[u32], max_chain_depth: usize) -> (usize, usize) {
+    if pos + MIN_MATCH > data.len() {
+        return (0, 0);
+    }
+    let h = hash4(data, pos);
+    let mut best_len = 0;
+    let mut best_off = 0;
+    let mut cp = head[h];
+    let mut count = 0;
+    let min_pos = pos.saturating_sub(WINDOW_SIZE);
+
+    while cp != u32::MAX && (cp as usize) >= min_pos && count < max_chain_depth {
+        let j = cp as usize;
+        if j < pos {
+            let max_len = MAX_MATCH.min(data.len() - pos);
+            let mut len = 0;
+            while len < max_len && data[j + len] == data[pos + len] {
+                len += 1;
+            }
+            if len >= MIN_MATCH && len > best_len {
+                best_len = len;
+                best_off = pos - j;
+                if len == max_len {
+                    break;
+                }
+            }
+        }
+        cp = chain[j];
+        count += 1;
+    }
+    (best_len, best_off)
 }
 
 fn lz_encode(data: &[u8]) -> Vec<u8> {
     if data.len() < 8 {
-        // Too small for LZ, store as literal run
         return encode_literals(data);
     }
 
     let mut result = Vec::with_capacity(data.len());
 
-    // Hash table: maps hash → most recent position
-    let mut head = vec![0u32; HASH_SIZE]; // head of chain
-    let mut chain = vec![0u32; data.len()]; // chain links
-    // Initialize heads to a sentinel
-    for h in head.iter_mut() {
-        *h = u32::MAX;
-    }
+    let mut head = vec![u32::MAX; HASH_SIZE];
+    let mut chain = vec![0u32; data.len()];
 
     let mut i = 0;
-    let mut literal_start = 0;
+    let mut lit_start = 0;
 
     while i < data.len() {
-        if i + MIN_MATCH > data.len() {
-            break;
-        }
+        let (best_len, best_off) = find_match(data, i, &head, &chain, MAX_CHAIN);
 
         let h = hash4(data, i);
-        let mut best_len = 0usize;
-        let mut best_offset = 0usize;
-
-        // Search the hash chain
-        let mut chain_pos = head[h];
-        let mut chain_count = 0;
-        let min_pos = if i > WINDOW_SIZE { i - WINDOW_SIZE } else { 0 };
-
-        while chain_pos != u32::MAX && (chain_pos as usize) >= min_pos && chain_count < MAX_CHAIN {
-            let j = chain_pos as usize;
-            if j < i {
-                // Compare
-                let max_len = MAX_MATCH.min(data.len() - i);
-                let mut len = 0;
-                while len < max_len && data[j + len] == data[i + len] {
-                    len += 1;
-                }
-                if len >= MIN_MATCH && len > best_len {
-                    best_len = len;
-                    best_offset = i - j;
-                    if len == max_len {
-                        break;
-                    }
-                }
-            }
-            chain_pos = chain[j];
-            chain_count += 1;
-        }
-
-        // Update hash chain
         chain[i] = head[h];
         head[h] = i as u32;
 
         if best_len >= MIN_MATCH {
-            // LAZY MATCHING: check if position i+1 has an even longer match.
-            // If so, emit i as a literal and use the longer match at i+1.
-            // This is the key optimization gzip -9 uses.
+            // Lazy matching: check if i+1 has an even longer match
             let mut use_match = true;
             if best_len < MAX_MATCH && i + 1 + MIN_MATCH <= data.len() {
-                let h2 = hash4(data, i + 1);
-                let mut lazy_len = 0usize;
-                let mut chain_pos2 = head[h2];
-                let mut chain_count2 = 0;
-                let min_pos2 = if i + 1 > WINDOW_SIZE { i + 1 - WINDOW_SIZE } else { 0 };
-
-                while chain_pos2 != u32::MAX && (chain_pos2 as usize) >= min_pos2 && chain_count2 < MAX_CHAIN / 2 {
-                    let j2 = chain_pos2 as usize;
-                    if j2 < i + 1 {
-                        let max_len2 = MAX_MATCH.min(data.len() - (i + 1));
-                        let mut len2 = 0;
-                        while len2 < max_len2 && data[j2 + len2] == data[i + 1 + len2] {
-                            len2 += 1;
-                        }
-                        if len2 > lazy_len {
-                            lazy_len = len2;
-                        }
-                    }
-                    chain_pos2 = chain[j2];
-                    chain_count2 += 1;
-                }
-
-                // If lazy match at i+1 is significantly longer, skip current match
+                let (lazy_len, _) = find_match(data, i + 1, &head, &chain, MAX_CHAIN / 2);
                 if lazy_len > best_len + 1 {
                     use_match = false;
                 }
             }
 
             if use_match {
-                // Flush pending literals
-                if i > literal_start {
-                    emit_literals(&data[literal_start..i], &mut result);
+                if i > lit_start {
+                    emit_literals(&data[lit_start..i], &mut result);
                 }
 
-                // Emit match
-                emit_match(best_offset, best_len, &mut result);
+                emit_match(best_off, best_len, &mut result);
 
-                // Update hash for skipped positions
                 for k in 1..best_len {
                     if i + k + 4 <= data.len() {
                         let hk = hash4(data, i + k);
@@ -310,9 +236,8 @@ fn lz_encode(data: &[u8]) -> Vec<u8> {
                 }
 
                 i += best_len;
-                literal_start = i;
+                lit_start = i;
             } else {
-                // Skip this match, emit as literal, try again at i+1
                 i += 1;
             }
         } else {
@@ -320,9 +245,8 @@ fn lz_encode(data: &[u8]) -> Vec<u8> {
         }
     }
 
-    // Flush remaining literals
-    if literal_start < data.len() {
-        emit_literals(&data[literal_start..data.len()], &mut result);
+    if lit_start < data.len() {
+        emit_literals(&data[lit_start..], &mut result);
     }
 
     result
@@ -334,13 +258,13 @@ fn encode_literals(data: &[u8]) -> Vec<u8> {
     result
 }
 
-fn emit_literals(literals: &[u8], out: &mut Vec<u8>) {
+fn emit_literals(lits: &[u8], out: &mut Vec<u8>) {
     let mut i = 0;
-    while i < literals.len() {
-        let count = (literals.len() - i).min(128);
-        out.push((count - 1) as u8); // bit 7 = 0, bits 0-6 = count-1
-        out.extend_from_slice(&literals[i..i + count]);
-        i += count;
+    while i < lits.len() {
+        let n = (lits.len() - i).min(128);
+        out.push((n - 1) as u8);
+        out.extend_from_slice(&lits[i..i + n]);
+        i += n;
     }
 }
 
@@ -348,20 +272,31 @@ fn emit_match(offset: usize, length: usize, out: &mut Vec<u8>) {
     debug_assert!(offset >= 1 && offset <= WINDOW_SIZE);
     debug_assert!(length >= MIN_MATCH && length <= MAX_MATCH);
 
-    let offset_minus1 = offset - 1;
+    let off = offset - 1;
 
-    if offset_minus1 < 0x7F00 {
-        // Short match: 3 bytes total — ctrl(1) + offset_lo(1) + length(1)
-        out.push(0x80 | ((offset_minus1 >> 8) as u8 & 0x7F));
-        out.push((offset_minus1 & 0xFF) as u8);
+    if off < 0x7F00 {
+        out.push(0x80 | ((off >> 8) as u8 & 0x7F));
+        out.push((off & 0xFF) as u8);
         out.push((length - MIN_MATCH) as u8);
     } else {
-        // Long match: 5 bytes total — 0xFF marker + offset(3 bytes LE) + length(1)
         out.push(0xFF);
-        out.push((offset_minus1 & 0xFF) as u8);
-        out.push(((offset_minus1 >> 8) & 0xFF) as u8);
-        out.push(((offset_minus1 >> 16) & 0xFF) as u8);
+        out.push((off & 0xFF) as u8);
+        out.push(((off >> 8) & 0xFF) as u8);
+        out.push(((off >> 16) & 0xFF) as u8);
         out.push((length - MIN_MATCH) as u8);
+    }
+}
+
+/// Copy a match from already-decoded output (handles overlapping copies).
+fn copy_match(result: &mut Vec<u8>, offset: usize, length: usize) {
+    let start = result.len().saturating_sub(offset);
+    for j in 0..length {
+        let idx = start + (j % offset);
+        if idx < result.len() {
+            result.push(result[idx]);
+        } else {
+            result.push(0);
+        }
     }
 }
 
@@ -374,7 +309,6 @@ fn lz_decode(data: &[u8]) -> Vec<u8> {
         i += 1;
 
         if ctrl & 0x80 == 0 {
-            // Literal run: count = (ctrl & 0x7F) + 1
             let count = (ctrl & 0x7F) as usize + 1;
             if i + count > data.len() {
                 break;
@@ -382,7 +316,6 @@ fn lz_decode(data: &[u8]) -> Vec<u8> {
             result.extend_from_slice(&data[i..i + count]);
             i += count;
         } else if ctrl == 0xFF {
-            // Extended match: 3-byte LE offset + 1-byte length
             if i + 4 > data.len() {
                 break;
             }
@@ -392,36 +325,17 @@ fn lz_decode(data: &[u8]) -> Vec<u8> {
             let offset = offset + 1;
             let length = data[i + 3] as usize + MIN_MATCH;
             i += 4;
-
-            let start = result.len().saturating_sub(offset);
-            for j in 0..length {
-                let idx = start + (j % offset);
-                if idx < result.len() {
-                    result.push(result[idx]);
-                } else {
-                    result.push(0);
-                }
-            }
+            copy_match(&mut result, offset, length);
         } else {
-            // Normal match: ctrl has bit 7 set, bits 0-6 = high offset bits
             if i + 2 > data.len() {
                 break;
             }
-            let offset_hi = (ctrl & 0x7F) as u16;
-            let offset_lo = data[i] as u16;
-            let offset = ((offset_hi << 8) | offset_lo) as usize + 1;
+            let off_hi = (ctrl & 0x7F) as u16;
+            let off_lo = data[i] as u16;
+            let offset = ((off_hi << 8) | off_lo) as usize + 1;
             let length = data[i + 1] as usize + MIN_MATCH;
             i += 2;
-
-            let start = result.len().saturating_sub(offset);
-            for j in 0..length {
-                let idx = start + (j % offset);
-                if idx < result.len() {
-                    result.push(result[idx]);
-                } else {
-                    result.push(0);
-                }
-            }
+            copy_match(&mut result, offset, length);
         }
     }
 
@@ -433,57 +347,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_lz_roundtrip() {
+    fn lz_roundtrip() {
         let data = b"the quick brown fox jumps over the lazy dog and the quick brown fox jumps again";
-        let encoded = lz_encode(data);
-        let decoded = lz_decode(&encoded);
+        let decoded = lz_decode(&lz_encode(data));
         assert_eq!(&decoded[..], &data[..]);
     }
 
     #[test]
-    fn test_lz_highly_repetitive() {
+    fn lz_highly_repetitive() {
         let data = "hello world! ".repeat(1000);
-        let encoded = lz_encode(data.as_bytes());
-        assert!(
-            encoded.len() < data.len() / 5,
-            "expected >5:1 ratio, got {}:{}",
-            data.len(),
-            encoded.len()
-        );
-        let decoded = lz_decode(&encoded);
-        assert_eq!(decoded, data.as_bytes());
+        let enc = lz_encode(data.as_bytes());
+        assert!(enc.len() < data.len() / 5, "ratio {}:{}", data.len(), enc.len());
+        assert_eq!(lz_decode(&enc), data.as_bytes());
     }
 
     #[test]
-    fn test_lz_small() {
+    fn lz_small_input() {
         let data = b"hi";
-        let encoded = lz_encode(data);
-        let decoded = lz_decode(&encoded);
-        assert_eq!(&decoded[..], &data[..]);
+        assert_eq!(&lz_decode(&lz_encode(data))[..], &data[..]);
     }
 
     #[test]
-    fn test_lz_empty() {
-        let data: &[u8] = &[];
-        let encoded = lz_encode(data);
-        let decoded = lz_decode(&encoded);
-        assert_eq!(decoded, data);
+    fn lz_empty() {
+        let enc = lz_encode(&[]);
+        assert_eq!(lz_decode(&enc), &[] as &[u8]);
     }
 
     #[test]
-    fn test_lzans_roundtrip() {
+    fn lzans_roundtrip() {
         let data = "the quick brown fox ".repeat(500);
-        let encoded = encode(data.as_bytes(), CodecType::LzAns);
-        let decoded = decode(&encoded, CodecType::LzAns);
+        let decoded = decode(&encode(data.as_bytes(), CodecType::LzAns), CodecType::LzAns);
         assert_eq!(decoded, data.as_bytes());
     }
 
     #[test]
-    fn test_select_best() {
+    fn select_best_compresses() {
         let data = "hello world hello world hello hello world world ".repeat(100);
         let (codec, compressed) = select_best_codec(data.as_bytes());
         assert!(compressed.len() < data.len() / 3);
-        let decoded = decode(&compressed, codec);
-        assert_eq!(decoded, data.as_bytes());
+        assert_eq!(decode(&compressed, codec), data.as_bytes());
     }
 }
