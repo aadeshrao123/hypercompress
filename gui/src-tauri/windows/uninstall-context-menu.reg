@@ -1,0 +1,11 @@
+Windows Registry Editor Version 5.00
+
+; ============================================================
+; Remove HyperCompress context menu entries
+; ============================================================
+
+[-HKEY_CURRENT_USER\Software\Classes\*\shell\HyperCompress]
+[-HKEY_CURRENT_USER\Software\Classes\Directory\shell\HyperCompress]
+[-HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\HyperCompress]
+[-HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive]
+[-HKEY_CURRENT_USER\Software\Classes\.hc]

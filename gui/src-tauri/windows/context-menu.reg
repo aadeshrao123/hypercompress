@@ -1,0 +1,57 @@
+Windows Registry Editor Version 5.00
+
+; ============================================================
+; HyperCompress context menu entries (manual install)
+; Adjust the exe path below if installed elsewhere.
+; ============================================================
+
+; --- Right-click any file -> "Compress with HyperCompress" ---
+[HKEY_CURRENT_USER\Software\Classes\*\shell\HyperCompress]
+@="Compress with HyperCompress"
+"Icon"="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\*\shell\HyperCompress\command]
+@="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\" compress \"%1\""
+
+; --- Right-click any folder -> "Compress with HyperCompress" ---
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\HyperCompress]
+@="Compress with HyperCompress"
+"Icon"="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\HyperCompress\command]
+@="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\" compress \"%1\""
+
+; --- Right-click inside a folder background ---
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\HyperCompress]
+@="Compress with HyperCompress"
+"Icon"="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\HyperCompress\command]
+@="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\" compress \"%V\""
+
+; --- .hc file type registration ---
+[HKEY_CURRENT_USER\Software\Classes\.hc]
+@="HyperCompress.Archive"
+
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive]
+@="HyperCompress Archive"
+
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive\DefaultIcon]
+@="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\",0"
+
+; Default action for .hc = extract
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive\shell]
+@="extract"
+
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive\shell\extract]
+@="Extract with HyperCompress"
+"Icon"="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive\shell\extract\command]
+@="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\" decompress \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive\shell\open]
+@="Open with HyperCompress"
+
+[HKEY_CURRENT_USER\Software\Classes\HyperCompress.Archive\shell\open\command]
+@="\"C:\\Program Files\\HyperCompress\\hypercompress.exe\" decompress \"%1\""
