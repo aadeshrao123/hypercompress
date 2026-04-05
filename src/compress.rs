@@ -67,6 +67,9 @@ fn try_whole_file_lzma(data: &[u8]) -> Option<(Vec<u8>, usize, TransformType)> {
         transforms.push(TransformType::Bcj);
     }
     if dtype == DataType::Binary {
+        transforms.push(TransformType::Precomp);
+    }
+    if dtype == DataType::Binary {
         transforms.push(TransformType::Prediction);
         transforms.push(TransformType::Delta);
     }
@@ -227,6 +230,7 @@ fn compress_chunk_optimal(chunk: &Chunk) -> CompressedChunk {
             candidates.push(TransformType::Prediction);
             candidates.push(TransformType::StructSplit);
             candidates.push(TransformType::Delta);
+            candidates.push(TransformType::Precomp);
             if crate::transform::bcj::is_likely_executable(&chunk.data) {
                 candidates.push(TransformType::Bcj);
             }

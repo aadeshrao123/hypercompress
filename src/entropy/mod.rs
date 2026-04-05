@@ -49,24 +49,76 @@ pub fn decode(data: &[u8], codec: CodecType) -> Vec<u8> {
 
 fn lzma_compress(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
-    let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
-    if encoder.write_all(data).is_ok() {
-        if let Ok(output) = encoder.finish() {
-            return output;
-        }
-    }
-    data.to_vec()
+    use xz2::stream::MtStreamBuilder;
+
+    let ascii = data.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count() as f64
+        / data.len().max(1) as f64;
+
+    // pick lc/lp/pb based on data characteristics
+    let (lc, lp, pb) = if ascii > 0.8 {
+        (3, 0, 0) // text
+    } else if data.len() % 4 == 0 && ascii < 0.3 {
+        (0, 2, 2) // 4-byte aligned binary
+    } else if data.len() % 2 == 0 && ascii < 0.4 {
+        (1, 1, 1) // 2-byte aligned
+    } else {
+        (3, 0, 2) // default
+    };
+
+    // try tuned params
+    let tuned = lzma_with_params(data, 6, lc, lp, pb);
+
+    // try multithreaded default for large data
+    let mt = if data.len() > 256 * 1024 {
+        MtStreamBuilder::new()
+            .preset(6)
+            .threads(num_cpus())
+            .encoder()
+            .ok()
+            .and_then(|stream| {
+                let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
+                enc.write_all(data).ok()?;
+                enc.finish().ok()
+            })
+    } else {
+        None
+    };
+
+    // pick smallest
+    let mut best = data.to_vec();
+    if let Some(ref t) = tuned { if t.len() < best.len() { best = t.clone(); } }
+    if let Some(ref m) = mt { if m.len() < best.len() { best = m.clone(); } }
+    best
+}
+
+fn lzma_with_params(data: &[u8], preset: u32, lc: u32, lp: u32, pb: u32) -> Option<Vec<u8>> {
+    use std::io::Write;
+    use xz2::stream::{Filters, LzmaOptions, Stream};
+
+    let mut opts = LzmaOptions::new_preset(preset).ok()?;
+    opts.literal_context_bits(lc);
+    opts.literal_position_bits(lp);
+    opts.position_bits(pb);
+
+    let mut filters = Filters::new();
+    filters.lzma2(&opts);
+    let stream = Stream::new_stream_encoder(&filters, xz2::stream::Check::Crc64).ok()?;
+    let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
+    enc.write_all(data).ok()?;
+    enc.finish().ok()
+}
+
+fn num_cpus() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(2)
 }
 
 fn lzma_decompress(data: &[u8]) -> Vec<u8> {
     use std::io::Read;
-    let mut decoder = xz2::read::XzDecoder::new(data);
-    let mut output = Vec::new();
-    if decoder.read_to_end(&mut output).is_ok() {
-        output
-    } else {
-        data.to_vec()
-    }
+    let mut dec = xz2::read::XzDecoder::new(data);
+    let mut out = Vec::new();
+    if dec.read_to_end(&mut out).is_ok() { out } else { data.to_vec() }
 }
 
 /// Try multiple codecs and return whichever compresses smallest.

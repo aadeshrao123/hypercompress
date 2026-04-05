@@ -57,6 +57,7 @@ pub enum TransformType {
     Prediction = 8,
     StructSplit = 9,
     Bcj = 10,
+    Precomp = 11,
 }
 
 impl TransformType {
@@ -73,6 +74,7 @@ impl TransformType {
             8 => Some(Self::Prediction),
             9 => Some(Self::StructSplit),
             10 => Some(Self::Bcj),
+            11 => Some(Self::Precomp),
             _ => None,
         }
     }

@@ -4,6 +4,7 @@ pub mod bwt;
 pub mod delta;
 pub mod float_split;
 pub mod mtf;
+pub mod precomp;
 pub mod prediction;
 pub mod rle;
 pub mod struct_split;
@@ -48,6 +49,7 @@ pub fn apply_transform(data: &[u8], transform: TransformType) -> Vec<u8> {
         TransformType::Prediction => prediction::encode(data),
         TransformType::StructSplit => struct_split::encode(data),
         TransformType::Bcj => bcj::encode(data),
+        TransformType::Precomp => precomp::encode(data),
     }
 }
 
@@ -75,5 +77,6 @@ pub fn reverse_transform(data: &[u8], transform: TransformType) -> Vec<u8> {
         TransformType::Prediction => prediction::decode(data),
         TransformType::StructSplit => struct_split::decode(data),
         TransformType::Bcj => bcj::decode(data),
+        TransformType::Precomp => precomp::decode(data),
     }
 }
