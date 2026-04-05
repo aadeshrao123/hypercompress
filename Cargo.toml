@@ -12,6 +12,8 @@ thiserror = "2"
 rayon = "1.10"
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 xz2 = "0.1"
+flate2 = "1"
+bzip2 = "0.5"
 
 [profile.release]
 opt-level = 3
