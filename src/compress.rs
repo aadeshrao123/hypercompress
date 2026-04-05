@@ -8,11 +8,23 @@ use crate::fingerprint;
 use crate::format::{ChunkMeta, CodecType, DataType, FileHeader, TransformType, FORMAT_VERSION};
 use crate::transform;
 
+/// Compression level controls speed/ratio tradeoff.
+/// Level 1-3: fast — transforms + ANS/LZ only, no LZMA
+/// Level 4-6: balanced — transforms + LZMA on hard-to-compress data
+/// Level 7-9: max ratio — transforms + LZMA everywhere + whole-file attempt
+static LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6);
+
+pub fn set_level(level: u32) {
+    LEVEL.store(level.clamp(1, 9), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn get_level() -> u32 {
+    LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn compress<W: Write>(data: &[u8], writer: &mut W) -> io::Result<CompressStats> {
     let mut stats = CompressStats::default();
     stats.original_size = data.len() as u64;
-
-    // Try per-chunk and whole-file LZMA, keep whichever is smaller.
 
     let mut chunks = chunk::split_into_chunks(data, chunk::DEFAULT_CHUNK_SIZE);
     fingerprint::fingerprint_chunks(&mut chunks);
@@ -28,7 +40,7 @@ pub fn compress<W: Write>(data: &[u8], writer: &mut W) -> io::Result<CompressSta
         + compressed_chunks.len() * ChunkMeta::SIZE;
     let approach_a = per_chunk_overhead + per_chunk_data;
 
-    let approach_b = if data.len() >= 256 {
+    let approach_b = if data.len() >= 256 && get_level() >= 4 {
         try_whole_file_lzma(data)
     } else {
         None
@@ -268,11 +280,6 @@ fn compress_chunk_optimal(chunk: &Chunk) -> CompressedChunk {
     let mut best_size = raw_size;
 
     for &tf in &candidates {
-        // skip BWT on chunks > 64KB (cyclic sort too slow)
-        if matches!(tf, TransformType::BwtMtf | TransformType::Bwt) && chunk.data.len() > 65536 {
-            continue;
-        }
-
         let transformed = transform::apply_transform(&chunk.data, tf);
         let (codec, encoded) = entropy::select_best_codec(&transformed);
 

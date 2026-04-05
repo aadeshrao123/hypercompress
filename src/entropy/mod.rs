@@ -135,12 +135,17 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         }
     }
 
-    // medium-high entropy: our transforms already ran, just try LZMA
+    let level = crate::compress::get_level();
+
+    // high entropy: skip custom codecs, just try LZMA if level allows
     if ent > 5.5 {
-        try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+        if level >= 4 {
+            try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+        }
         return (best.0, best.1);
     }
 
+    // fast codecs — always run (they're what make us fast + good)
     try_codec(&mut best, CodecType::Ans, ans::encode(data));
 
     let lz_out = lz_encode(data);
@@ -151,13 +156,14 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         try_codec(&mut best, CodecType::LzAns, ans::encode(&lz_out));
     }
 
-    if data.len() >= 64 {
+    // mid-tier codecs — level 3+
+    if level >= 3 && data.len() >= 64 {
         if let Some(o1) = order1::encode(data) {
             try_codec(&mut best, CodecType::Order1, o1);
         }
     }
 
-    if data.len() >= 32 {
+    if level >= 3 && data.len() >= 32 {
         try_codec(&mut best, CodecType::LzOptimal, lz_optimal::compress(data));
     }
 

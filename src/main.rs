@@ -25,6 +25,9 @@ enum Commands {
         input: PathBuf,
         /// Output .hc file (default: input_name.hc)
         output: Option<PathBuf>,
+        /// Compression level 1-9 (1=fastest, 6=default, 9=best)
+        #[arg(short, long, default_value = "6")]
+        level: u32,
     },
     /// Decompress a .hc file (auto-extracts folders)
     #[command(alias = "d")]
@@ -59,7 +62,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Compress { input, output } => cmd_compress(input, output),
+        Commands::Compress { input, output, level } => {
+            hypercompress::compress::set_level(level);
+            cmd_compress(input, output)
+        }
         Commands::Decompress { input, output } => cmd_decompress(input, output),
         Commands::Analyze { input } => cmd_analyze(input),
         Commands::Info { input } => cmd_info(input),
