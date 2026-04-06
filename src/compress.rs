@@ -98,41 +98,46 @@ fn compress_chunk(chunk: &Chunk, level: u32) -> CompressedChunk {
     }
 }
 
-// Level 1-2: ONE transform, ONE fast codec. No verification (codecs are tested).
 fn compress_fast(chunk: &Chunk, checksum: u32) -> CompressedChunk {
     let tf = transform::select_transform(chunk.data_type);
     let transformed = transform::apply_transform(&chunk.data, tf);
     let (codec, encoded) = entropy::encode_fast(&transformed);
 
-    if encoded.len() < chunk.data.len() {
-        CompressedChunk { data: encoded, transform: tf, codec, checksum }
+    if encoded.len() < chunk.data.len() && verify_if_needed(&chunk.data, &encoded, tf, codec) {
+        return CompressedChunk { data: encoded, transform: tf, codec, checksum };
+    }
+
+    let (c2, e2) = entropy::encode_fast(&chunk.data);
+    if e2.len() < chunk.data.len() {
+        CompressedChunk { data: e2, transform: TransformType::None, codec: c2, checksum }
     } else {
-        // transform didn't help, try raw
-        let (c2, e2) = entropy::encode_fast(&chunk.data);
-        if e2.len() < chunk.data.len() {
-            CompressedChunk { data: e2, transform: TransformType::None, codec: c2, checksum }
-        } else {
-            CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
-        }
+        CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
     }
 }
 
-// Level 3-4: ONE transform, fast codecs. No verification.
 fn compress_balanced(chunk: &Chunk, checksum: u32) -> CompressedChunk {
     let tf = transform::select_transform(chunk.data_type);
     let transformed = transform::apply_transform(&chunk.data, tf);
     let (codec, encoded) = entropy::select_fast_codec(&transformed);
 
-    if encoded.len() < chunk.data.len() {
-        CompressedChunk { data: encoded, transform: tf, codec, checksum }
-    } else {
-        let (c2, e2) = entropy::select_fast_codec(&chunk.data);
-        if e2.len() < chunk.data.len() {
-            CompressedChunk { data: e2, transform: TransformType::None, codec: c2, checksum }
-        } else {
-            CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
-        }
+    if encoded.len() < chunk.data.len() && verify_if_needed(&chunk.data, &encoded, tf, codec) {
+        return CompressedChunk { data: encoded, transform: tf, codec, checksum };
     }
+
+    let (c2, e2) = entropy::select_fast_codec(&chunk.data);
+    if e2.len() < chunk.data.len() {
+        CompressedChunk { data: e2, transform: TransformType::None, codec: c2, checksum }
+    } else {
+        CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
+    }
+}
+
+// only verify when a transform is applied — raw LZ roundtrips are always safe
+fn verify_if_needed(original: &[u8], encoded: &[u8], tf: TransformType, codec: CodecType) -> bool {
+    if tf == TransformType::None { return true; }
+    let dec = entropy::decode(encoded, codec);
+    let restored = transform::reverse_transform(&dec, tf);
+    restored.len() >= original.len() && restored[..original.len()] == original[..]
 }
 
 // Level 5-6: primary transform + no-transform, pick smaller. Verify roundtrip.
