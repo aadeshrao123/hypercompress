@@ -29,6 +29,7 @@ pub fn encode(data: &[u8], codec: CodecType) -> Vec<u8> {
         }
         CodecType::LzOptimal => lz_optimal::compress(data),
         CodecType::Lzma => lzma_for_level(data, crate::compress::get_level()),
+        CodecType::Zstd => zstd_compress(data, crate::compress::get_level()),
     }
 }
 
@@ -44,7 +45,31 @@ pub fn decode(data: &[u8], codec: CodecType) -> Vec<u8> {
         CodecType::Order1 => order1::decode(data),
         CodecType::LzOptimal => lz_optimal::decompress(data),
         CodecType::Lzma => lzma_decompress(data),
+        CodecType::Zstd => zstd_decompress(data),
     }
+}
+
+fn zstd_level_for_hc(hc_level: u32) -> i32 {
+    match hc_level {
+        1 => 1,
+        2 => 3,
+        3 => 3,
+        4 => 6,
+        5 => 9,
+        _ => 12,
+    }
+}
+
+fn zstd_compress(data: &[u8], hc_level: u32) -> Vec<u8> {
+    let zlevel = zstd_level_for_hc(hc_level);
+    zstd::bulk::compress(data, zlevel)
+        .unwrap_or_else(|_| data.to_vec())
+}
+
+fn zstd_decompress(data: &[u8]) -> Vec<u8> {
+    // try with generous capacity first, fall back to streaming
+    zstd::stream::decode_all(std::io::Cursor::new(data))
+        .unwrap_or_else(|_| data.to_vec())
 }
 
 // LZMA preset mapping.
@@ -157,21 +182,22 @@ fn lzma_decompress(data: &[u8]) -> Vec<u8> {
     if dec.read_to_end(&mut out).is_ok() { out } else { data.to_vec() }
 }
 
-/// Level 1-2: just LZ+ANS, one pass, no experiments. Like 7-Zip "Fastest".
-/// Gzip-style fast encoder: 3-byte hash, chain depth 4, skip insertions on long matches.
-/// No entropy check, no ANS — just LZ, single pass. Matches gzip level 1 approach.
+/// Level 1-2: zstd for speed. ~500 MB/s with ratios beating gzip.
 pub fn encode_fast(data: &[u8]) -> (CodecType, Vec<u8>) {
     if data.len() < 8 { return (CodecType::Raw, data.to_vec()); }
 
-    let lz = lz_turbo(data);
-    if lz.len() < data.len() {
-        (CodecType::Lz, lz)
-    } else {
-        (CodecType::Raw, data.to_vec())
+    let level = crate::compress::get_level();
+    let zlevel = zstd_level_for_hc(level);
+    if let Ok(zst) = zstd::bulk::compress(data, zlevel) {
+        if zst.len() < data.len() {
+            return (CodecType::Zstd, zst);
+        }
     }
+    (CodecType::Raw, data.to_vec())
 }
 
-// Gzip deflate_fast inspired: 3-byte hash, chain=4, nice=8, skip inserts on long matches.
+// kept for potential fallback — zstd is now primary at levels 1-2
+#[allow(dead_code)]
 fn lz_turbo(data: &[u8]) -> Vec<u8> {
     const HASH_BITS: usize = 15;
     const HASH_SIZE: usize = 1 << HASH_BITS;
@@ -247,12 +273,14 @@ fn lz_turbo(data: &[u8]) -> Vec<u8> {
     result
 }
 
+#[allow(dead_code)]
 fn encode_literals_turbo(data: &[u8]) -> Vec<u8> {
     let mut r = Vec::with_capacity(data.len() + data.len() / 128 + 1);
     emit_literals_turbo(data, &mut r);
     r
 }
 
+#[allow(dead_code)]
 fn emit_literals_turbo(lits: &[u8], out: &mut Vec<u8>) {
     let mut i = 0;
     while i < lits.len() {
@@ -263,6 +291,7 @@ fn emit_literals_turbo(lits: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+#[allow(dead_code)]
 fn emit_match_turbo(offset: usize, length: usize, out: &mut Vec<u8>) {
     // same format as our main LZ encoder so the same decoder works
     let off = offset - 1;
@@ -279,26 +308,34 @@ fn emit_match_turbo(offset: usize, length: usize, out: &mut Vec<u8>) {
     }
 }
 
-/// Level 3-4: LZ + ANS + LzAns + LZMA on high-entropy.
+/// Level 3-4: zstd + LZ + ANS + LzAns + LZMA on high-entropy.
 pub fn select_fast_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
     if data.is_empty() { return (CodecType::Raw, Vec::new()); }
     let ent = quick_entropy(data);
     let level = crate::compress::get_level();
 
-    // high entropy: try LZMA instead of giving up
+    // high entropy: try zstd and LZMA, pick smaller
     if ent > 7.0 {
-        let lzma = lzma_for_level(data, level);
-        return if lzma.len() < data.len() {
-            (CodecType::Lzma, lzma)
-        } else {
-            (CodecType::Raw, data.to_vec())
+        let mut best = (CodecType::Raw, data.to_vec(), data.len());
+        let try_c = |b: &mut (CodecType, Vec<u8>, usize), c: CodecType, e: Vec<u8>| {
+            if e.len() < b.2 { b.2 = e.len(); b.0 = c; b.1 = e; }
         };
+        if let Ok(zst) = zstd::bulk::compress(data, zstd_level_for_hc(level)) {
+            try_c(&mut best, CodecType::Zstd, zst);
+        }
+        try_c(&mut best, CodecType::Lzma, lzma_for_level(data, level));
+        return (best.0, best.1);
     }
 
     let mut best = (CodecType::Raw, data.to_vec(), data.len());
     let try_c = |b: &mut (CodecType, Vec<u8>, usize), c: CodecType, e: Vec<u8>| {
         if e.len() < b.2 { b.2 = e.len(); b.0 = c; b.1 = e; }
     };
+
+    // zstd is fast and often competitive — always try it
+    if let Ok(zst) = zstd::bulk::compress(data, zstd_level_for_hc(level)) {
+        try_c(&mut best, CodecType::Zstd, zst);
+    }
 
     try_c(&mut best, CodecType::Ans, ans::encode(data));
 
@@ -313,7 +350,7 @@ pub fn select_fast_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         }
     }
 
-    // try LZMA if fast codecs didn't do well enough
+    // try LZMA if nothing compressed well enough
     if best.2 > data.len() * 70 / 100 {
         try_c(&mut best, CodecType::Lzma, lzma_for_level(data, level));
     }
@@ -356,6 +393,10 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
 
     // low-medium entropy: try everything
     try_codec(&mut best, CodecType::Ans, ans::encode(data));
+
+    if let Ok(zst) = zstd::bulk::compress(data, zstd_level_for_hc(level)) {
+        try_codec(&mut best, CodecType::Zstd, zst);
+    }
 
     let lz_out = lz_encode(data);
     let lz_helped = lz_out.len() < data.len();

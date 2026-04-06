@@ -90,6 +90,7 @@ pub enum CodecType {
     Order1 = 4,
     LzOptimal = 5,
     Lzma = 6,
+    Zstd = 7,
 }
 
 impl CodecType {
@@ -102,6 +103,7 @@ impl CodecType {
             4 => Some(Self::Order1),
             5 => Some(Self::LzOptimal),
             6 => Some(Self::Lzma),
+            7 => Some(Self::Zstd),
             _ => None,
         }
     }

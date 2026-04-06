@@ -284,7 +284,7 @@ fn try_whole_file_lzma(data: &[u8], level: u32) -> Option<(Vec<u8>, usize, Trans
     best.map(|(d, tf)| (d, overhead, tf))
 }
 
-fn try_lzma_fast_path(data: &[u8], level: u32, dtype: DataType, overhead: usize) -> Option<(Vec<u8>, usize, TransformType)> {
+fn try_lzma_fast_path(data: &[u8], _level: u32, dtype: DataType, overhead: usize) -> Option<(Vec<u8>, usize, TransformType)> {
     let tf = match dtype {
         DataType::Binary | DataType::NumericInt => TransformType::Delta,
         _ => transform::select_transform(dtype),

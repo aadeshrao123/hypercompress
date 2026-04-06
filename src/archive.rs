@@ -52,19 +52,50 @@ pub fn compress_folder(input: &Path, output: &Path) -> io::Result<FolderStats> {
 
     // group by sort key — files with same type get solid-compressed together
     let groups = group_by_type(&entries);
+    let level = crate::compress::get_level();
 
     let mut compressed: Vec<(String, u64, Vec<u8>)> = Vec::new();
 
-    let solid_cap = solid_cap_for_level(crate::compress::get_level());
+    let solid_cap = solid_cap_for_level(level);
 
     // flatten into work items, then compress in parallel
     let mut work: Vec<WorkItem> = Vec::new();
-    for group in &groups {
-        for subgroup in split_solid_group(group, &entries, solid_cap) {
-            if subgroup.len() == 1 {
-                work.push(WorkItem::Single(subgroup[0]));
+
+    // at level 5+: merge ALL compressible groups into ONE solid stream (like 7-Zip)
+    // files are already sorted by type, so similar files are adjacent in the concatenation
+    if level >= 5 {
+        let mut compressible: Vec<usize> = Vec::new();
+        for group in &groups {
+            let key = file_sort_key(&entries[group[0]].0, &entries[group[0]].1);
+            if key.0 >= 10 {
+                // pre-compressed (zip, jpg, mp4, etc.) — store individually
+                for &idx in group {
+                    work.push(WorkItem::Single(idx));
+                }
             } else {
-                work.push(WorkItem::Solid(subgroup));
+                compressible.extend_from_slice(group);
+            }
+        }
+        // one big solid group for all compressible files
+        if compressible.len() > 1 {
+            for subgroup in split_solid_group(&compressible, &entries, solid_cap) {
+                if subgroup.len() == 1 {
+                    work.push(WorkItem::Single(subgroup[0]));
+                } else {
+                    work.push(WorkItem::Solid(subgroup));
+                }
+            }
+        } else if compressible.len() == 1 {
+            work.push(WorkItem::Single(compressible[0]));
+        }
+    } else {
+        for group in &groups {
+            for subgroup in split_solid_group(group, &entries, solid_cap) {
+                if subgroup.len() == 1 {
+                    work.push(WorkItem::Single(subgroup[0]));
+                } else {
+                    work.push(WorkItem::Solid(subgroup));
+                }
             }
         }
     }
@@ -129,20 +160,23 @@ fn compress_single(data: &[u8]) -> Vec<u8> {
         return compress_single_lzma(data, level);
     }
 
-    // level 1-2: chunk-based (fast LZ, no LZMA)
-    let mut comp = Vec::new();
-    let _ = crate::compress::compress(data, &mut comp);
-    if comp.len() < data.len() {
-        let mut buf = Vec::with_capacity(1 + comp.len());
-        buf.push(0x01);
-        buf.extend_from_slice(&comp);
-        buf
-    } else {
-        let mut buf = Vec::with_capacity(1 + data.len());
-        buf.push(0x00);
-        buf.extend_from_slice(data);
-        buf
+    // level 1-2: zstd for speed
+    if data.len() > 64 {
+        let zlevel = if level <= 1 { 1 } else { 3 };
+        if let Ok(zst) = zstd::bulk::compress(data, zlevel) {
+            if zst.len() < data.len() {
+                let mut buf = Vec::with_capacity(1 + zst.len());
+                buf.push(0x09); // marker for zstd-compressed single file
+                buf.extend_from_slice(&zst);
+                return buf;
+            }
+        }
     }
+
+    let mut buf = Vec::with_capacity(1 + data.len());
+    buf.push(0x00);
+    buf.extend_from_slice(data);
+    buf
 }
 
 fn compress_single_lzma(data: &[u8], level: u32) -> Vec<u8> {
@@ -189,17 +223,20 @@ fn compress_solid_group(entries: &[(String, Vec<u8>)], indices: &[usize]) -> Vec
         concat.extend_from_slice(&entries[idx].1);
     }
 
-    // direct LZMA on concatenated stream
     let solid_compressed = solid_lzma(&concat, level);
     let solid_overhead = 5 + indices.len() * 8;
     let solid_total = solid_compressed.len() + solid_overhead;
 
-    // quick individual estimate: just check first file to decide
-    let first_ind = compress_single(&entries[indices[0]].1);
-    let est_individual = first_ind.len() * indices.len();
+    // at level 5+: trust solid mode (cross-file dictionary wins on mixed data)
+    // at lower levels: compare against individual estimate
+    let use_solid = if level >= 5 {
+        solid_compressed.len() < concat.len()
+    } else {
+        let first_ind = compress_single(&entries[indices[0]].1);
+        solid_total < first_ind.len() * indices.len()
+    };
 
-    if solid_total < est_individual {
-        // solid wins — use it
+    if use_solid {
         let mut result = Vec::new();
         let mut header = Vec::new();
         header.push(0x02);
@@ -214,7 +251,6 @@ fn compress_solid_group(entries: &[(String, Vec<u8>)], indices: &[usize]) -> Vec
         }
         result
     } else {
-        // solid didn't win — compress individually
         indices.iter()
             .map(|&idx| compress_single(&entries[idx].1))
             .collect()
@@ -229,7 +265,6 @@ fn solid_lzma(data: &[u8], level: u32) -> Vec<u8> {
         let dec = crate::entropy::decode(&delta_lzma, crate::format::CodecType::Lzma);
         let restored = crate::transform::delta::decode(&dec);
         if restored.len() >= data.len() && restored[..data.len()] == data[..] {
-            // at level 1-5, don't bother trying raw LZMA if delta worked well
             if level <= 5 || delta_lzma.len() < data.len() * 70 / 100 {
                 let mut out = Vec::with_capacity(1 + delta_lzma.len());
                 out.push(0x04);
@@ -239,13 +274,24 @@ fn solid_lzma(data: &[u8], level: u32) -> Vec<u8> {
         }
     }
 
-    // raw LZMA fallback
+    // raw LZMA
     let raw_lzma = crate::entropy::lzma_for_level(data, level);
     if raw_lzma.len() < data.len() {
         let mut out = Vec::with_capacity(1 + raw_lzma.len());
         out.push(0x05);
         out.extend_from_slice(&raw_lzma);
         return out;
+    }
+
+    // zstd fallback (faster than chunk pipeline, often better ratio)
+    let zlevel = match level { 1..=3 => 1, 4..=5 => 6, _ => 12 };
+    if let Ok(zst) = zstd::bulk::compress(data, zlevel) {
+        if zst.len() < data.len() {
+            let mut out = Vec::with_capacity(1 + zst.len());
+            out.push(0x0A); // solid zstd marker
+            out.extend_from_slice(&zst);
+            return out;
+        }
     }
 
     // chunk-based fallback
@@ -258,15 +304,13 @@ fn solid_lzma(data: &[u8], level: u32) -> Vec<u8> {
 }
 
 fn solid_cap_for_level(level: u32) -> usize {
-    // 7-Zip uses 64MB solid blocks even at level 1.
-    // Level 1-2: per-file parallel (speed priority, no solid overhead).
-    // Level 3+: solid groups so similar files share LZMA dictionary.
     match level {
         0..=2 => 0,
         3..=4 => 64 * 1024 * 1024,
-        5 => 128 * 1024 * 1024,
-        6 => 512 * 1024 * 1024,
-        _ => 2 * 1024 * 1024 * 1024,
+        5 => 256 * 1024 * 1024,
+        6 => 1024 * 1024 * 1024,
+        // level 7+: effectively unlimited — all compressible files in one stream
+        _ => usize::MAX,
     }
 }
 
@@ -374,6 +418,9 @@ fn decompress_v2v3(data: &[u8], output_dir: &Path) -> io::Result<Vec<ArchiveEntr
             // delta + LZMA
             let dec = crate::entropy::decode(&cd[1..], crate::format::CodecType::Lzma);
             crate::transform::delta::decode(&dec)
+        } else if cd[0] == 0x09 {
+            // zstd single file
+            crate::entropy::decode(&cd[1..], crate::format::CodecType::Zstd)
         } else if cd[0] == 0x02 {
             // solid group header
             if cd.len() < 5 { Vec::new() } else {
@@ -426,21 +473,20 @@ fn decompress_solid_blob(blob: &[u8]) -> Vec<u8> {
     if blob.is_empty() { return Vec::new(); }
     match blob[0] {
         0x04 => {
-            // delta + LZMA
             let dec = crate::entropy::decode(&blob[1..], crate::format::CodecType::Lzma);
             crate::transform::delta::decode(&dec)
         }
         0x05 => {
-            // raw LZMA
             crate::entropy::decode(&blob[1..], crate::format::CodecType::Lzma)
         }
         0x06 => {
-            // chunk-based compression
             let mut cursor = Cursor::new(&blob[1..]);
             crate::decompress::decompress(&mut cursor).unwrap_or_default()
         }
+        0x0A => {
+            crate::entropy::decode(&blob[1..], crate::format::CodecType::Zstd)
+        }
         _ => {
-            // old format: try chunk-based decompression
             let mut cursor = Cursor::new(blob);
             crate::decompress::decompress(&mut cursor).unwrap_or_default()
         }
