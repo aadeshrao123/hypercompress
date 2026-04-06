@@ -48,14 +48,16 @@ pub fn compress_folder(input: &Path, output: &Path) -> io::Result<FolderStats> {
 
     let mut compressed: Vec<(String, u64, Vec<u8>)> = Vec::new();
 
+    let use_solid = crate::compress::get_level() >= 5;
+
     for group in &groups {
-        if group.len() == 1 {
-            // single file — compress individually
-            let (path, data) = &entries[group[0]];
-            let comp = compress_single(data);
-            compressed.push((path.clone(), data.len() as u64, comp));
+        if group.len() == 1 || !use_solid {
+            for &idx in group {
+                let (path, data) = &entries[idx];
+                let comp = compress_single(data);
+                compressed.push((path.clone(), data.len() as u64, comp));
+            }
         } else {
-            // solid group — concatenate then compress as one stream
             let solid = compress_solid_group(&entries, group);
             for (i, &idx) in group.iter().enumerate() {
                 let (path, data) = &entries[idx];
@@ -121,7 +123,6 @@ fn compress_solid_group(entries: &[(String, Vec<u8>)], indices: &[usize]) -> Vec
         concat.extend_from_slice(&entries[idx].1);
     }
 
-    // compress the concatenated blob
     let mut solid_compressed = Vec::new();
     let _ = crate::compress::compress(&concat, &mut solid_compressed);
 

@@ -115,28 +115,125 @@ fn lzma_decompress(data: &[u8]) -> Vec<u8> {
 }
 
 /// Level 1-2: just LZ+ANS, one pass, no experiments. Like 7-Zip "Fastest".
+/// Gzip-style fast encoder: 3-byte hash, chain depth 4, skip insertions on long matches.
+/// No entropy check, no ANS — just LZ, single pass. Matches gzip level 1 approach.
 pub fn encode_fast(data: &[u8]) -> (CodecType, Vec<u8>) {
-    if data.is_empty() { return (CodecType::Raw, Vec::new()); }
-    let ent = quick_entropy(data);
-    if ent > 7.5 { return (CodecType::Raw, data.to_vec()); }
+    if data.len() < 8 { return (CodecType::Raw, data.to_vec()); }
 
-    // high entropy: just ANS, skip expensive LZ search
-    if ent > 6.0 {
-        let a = ans::encode(data);
-        if a.len() < data.len() { return (CodecType::Ans, a); }
-        return (CodecType::Raw, data.to_vec());
-    }
-
-    let lz = lz_encode(data);
+    let lz = lz_turbo(data);
     if lz.len() < data.len() {
-        let lzans = ans::encode(&lz);
-        if lzans.len() < lz.len() { return (CodecType::LzAns, lzans); }
-        return (CodecType::Lz, lz);
+        (CodecType::Lz, lz)
+    } else {
+        (CodecType::Raw, data.to_vec())
+    }
+}
+
+// Gzip deflate_fast inspired: 3-byte hash, chain=4, nice=8, skip inserts on long matches.
+fn lz_turbo(data: &[u8]) -> Vec<u8> {
+    const HASH_BITS: usize = 15;
+    const HASH_SIZE: usize = 1 << HASH_BITS;
+    const HASH_MASK: usize = HASH_SIZE - 1;
+    const CHAIN_MAX: usize = 4;     // gzip level 1
+    const NICE_LEN: usize = 8;      // stop searching at 8
+    const SKIP_INSERT: usize = 4;   // skip hash inserts for matches > 4
+    const WIN: usize = 32768;       // 32K window like gzip
+
+    if data.len() < 4 { return encode_literals_turbo(data); }
+
+    let mut result = Vec::with_capacity(data.len());
+    let mut head = vec![u32::MAX; HASH_SIZE];
+    let mut chain = vec![u32::MAX; data.len()];
+
+    let mut i = 0;
+    let mut lit_start = 0;
+
+    while i + 2 < data.len() {
+        // 3-byte shift+XOR hash (like gzip)
+        let h = ((data[i] as usize) << 10 ^ (data[i+1] as usize) << 5 ^ data[i+2] as usize) & HASH_MASK;
+
+        let mut best_len = 0;
+        let mut best_off = 0;
+        let mut cpos = head[h];
+        let mut depth = 0;
+        let min = if i > WIN { i - WIN } else { 0 };
+
+        while cpos != u32::MAX && (cpos as usize) >= min && depth < CHAIN_MAX {
+            let j = cpos as usize;
+            if j < i {
+                let max_m = 258.min(data.len() - i);
+                let mut len = 0;
+                while len < max_m && data[j + len] == data[i + len] { len += 1; }
+                if len >= 3 && len > best_len {
+                    best_len = len;
+                    best_off = i - j;
+                    if len >= NICE_LEN { break; }
+                }
+            }
+            cpos = chain[j];
+            depth += 1;
+        }
+
+        // insert into chain
+        chain[i] = head[h];
+        head[h] = i as u32;
+
+        if best_len >= 3 {
+            if i > lit_start { emit_literals_turbo(&data[lit_start..i], &mut result); }
+            emit_match_turbo(best_off, best_len, &mut result);
+
+            // gzip optimization: skip hash insertions for long matches
+            if best_len <= SKIP_INSERT {
+                for k in 1..best_len {
+                    if i + k + 2 < data.len() {
+                        let hk = ((data[i+k] as usize) << 10 ^ (data[i+k+1] as usize) << 5 ^ data[i+k+2] as usize) & HASH_MASK;
+                        chain[i + k] = head[hk];
+                        head[hk] = (i + k) as u32;
+                    }
+                }
+            }
+            // else: skip all insertions (like gzip level 1 does for matches > max_insert_length)
+
+            i += best_len;
+            lit_start = i;
+        } else {
+            i += 1;
+        }
     }
 
-    let a = ans::encode(data);
-    if a.len() < data.len() { return (CodecType::Ans, a); }
-    (CodecType::Raw, data.to_vec())
+    if lit_start < data.len() { emit_literals_turbo(&data[lit_start..], &mut result); }
+    result
+}
+
+fn encode_literals_turbo(data: &[u8]) -> Vec<u8> {
+    let mut r = Vec::with_capacity(data.len() + data.len() / 128 + 1);
+    emit_literals_turbo(data, &mut r);
+    r
+}
+
+fn emit_literals_turbo(lits: &[u8], out: &mut Vec<u8>) {
+    let mut i = 0;
+    while i < lits.len() {
+        let n = (lits.len() - i).min(128);
+        out.push((n - 1) as u8);
+        out.extend_from_slice(&lits[i..i + n]);
+        i += n;
+    }
+}
+
+fn emit_match_turbo(offset: usize, length: usize, out: &mut Vec<u8>) {
+    // same format as our main LZ encoder so the same decoder works
+    let off = offset - 1;
+    if off < 0x7F00 {
+        out.push(0x80 | ((off >> 8) as u8 & 0x7F));
+        out.push((off & 0xFF) as u8);
+        out.push((length - 3) as u8);
+    } else {
+        out.push(0xFF);
+        out.push((off & 0xFF) as u8);
+        out.push(((off >> 8) & 0xFF) as u8);
+        out.push(((off >> 16) & 0xFF) as u8);
+        out.push((length - 3) as u8);
+    }
 }
 
 /// Level 3-4: LZ + ANS + LzAns. No LZMA, no optimal parsing.

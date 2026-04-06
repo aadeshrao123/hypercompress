@@ -27,7 +27,22 @@ pub fn compress<W: Write>(data: &[u8], writer: &mut W) -> io::Result<CompressSta
     let level = get_level();
 
     let mut chunks = chunk::split_into_chunks(data, chunk::DEFAULT_CHUNK_SIZE);
-    fingerprint::fingerprint_chunks(&mut chunks);
+
+    // level 1-2: skip fingerprinting on high-entropy chunks (gzip doesn't fingerprint at all)
+    if level >= 3 {
+        fingerprint::fingerprint_chunks(&mut chunks);
+    } else {
+        // quick classify: only check if text/structured (where transforms help)
+        for chunk in chunks.iter_mut() {
+            let ascii = chunk.data.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+            if ascii * 100 / chunk.data.len().max(1) > 80 {
+                // likely text — worth fingerprinting
+                let fp = fingerprint::Fingerprint::compute(&chunk.data);
+                chunk.data_type = fp.classify();
+            }
+            // else: leave as Binary (default), skip expensive fingerprint
+        }
+    }
 
     let compressed_chunks: Vec<CompressedChunk> = chunks
         .par_iter()
