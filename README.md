@@ -15,27 +15,28 @@ All benchmarks run on the same machine, same data, no cherry-picking. Reproduce 
 ```
 Compressor               Size      Ratio    Time     Speed
 -----------------------------------------------------------
-HC Ultra (9)            67.5MB    2.78x   281.0s    0.7 MB/s
-xz -9                  67.2MB    2.79x   120.0s      2 MB/s
-7-Zip Ultra (-mx9)     67.3MB    2.79x    56.9s      3 MB/s
-bzip2 -9               68.5MB    2.74x    10.4s     18 MB/s
-xz -6                  68.6MB    2.73x    14.9s     13 MB/s
-7-Zip Normal (-mx5)    68.8MB    2.73x    28.8s      7 MB/s
-HC Maximum (6)         69.5MB    2.70x    71.5s      3 MB/s
-7-Zip Fastest (-mx1)   76.0MB    2.47x     0.8s    235 MB/s
-HC Normal (4)          77.6MB    2.42x     3.8s     49 MB/s
-HC Fast (3)            79.1MB    2.37x     2.0s     94 MB/s
-xz -1                  79.0MB    2.37x     2.7s     70 MB/s
-gzip -9                82.6MB    2.27x    18.6s     10 MB/s
-WinRAR Best (-m5)      84.2MB    2.23x     2.8s     67 MB/s
-WinRAR Normal (-m3)    85.2MB    2.20x     2.0s     94 MB/s
-WinRAR Fastest (-m1)   91.2MB    2.06x     1.0s    188 MB/s
-gzip -1                94.4MB    1.99x     2.3s     82 MB/s
+xz -9 (best)           67.2MB    2.79x    87.4s      2 MB/s
+7-Zip Ultra (-mx9)     67.3MB    2.79x    50.6s      4 MB/s
+HC Ultra (9)           67.7MB    2.77x   109.0s      2 MB/s
+bzip2 -9               68.5MB    2.74x     9.3s     20 MB/s
+xz -6 (normal)         68.6MB    2.73x    10.0s     19 MB/s
+7-Zip Normal (-mx5)    68.8MB    2.73x    26.2s      7 MB/s
+HC Maximum (6)         69.7MB    2.69x    32.0s      6 MB/s
+7-Zip Fastest (-mx1)   76.0MB    2.47x     0.7s    268 MB/s
+HC Normal (4)          77.6MB    2.42x     5.2s     36 MB/s
+HC Fast (3)            79.4MB    2.36x     3.5s     54 MB/s
+xz -1 (fast)           79.0MB    2.37x     1.1s    171 MB/s
+gzip -9 (best)         82.6MB    2.27x    15.4s     12 MB/s
+WinRAR Best (-m5)      84.2MB    2.23x     2.5s     75 MB/s
+WinRAR Normal (-m3)    85.2MB    2.20x     1.8s    104 MB/s
+WinRAR Fastest (-m1)   91.2MB    2.06x     0.9s    209 MB/s
+gzip -1 (fastest)      94.4MB    1.99x     2.2s     85 MB/s
+HC Fastest (1)        128.5MB    1.46x     0.4s    469 MB/s
 
 Original               188MB
 ```
 
-HC Fast (level 3) beats WinRAR Best at the same speed. HC Ultra matches xz -9 and 7-Zip Ultra on ratio.
+HC Ultra matches xz -9 and 7-Zip Ultra on ratio (within 0.5MB). HC Fast beats WinRAR Best by 5MB. HC Maximum beats bzip2 and approaches 7-Zip Normal.
 
 ### Structured data (1.6MB — JSON, CSV, logs, XML, floats, integers)
 
