@@ -11,7 +11,7 @@ use crate::transform;
 // Like 7-Zip: level controls how hard we search.
 // Low levels = ONE transform + ONE codec, no experiments.
 // High levels = try multiple, keep best.
-static LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6);
+static LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(4);
 
 pub fn set_level(level: u32) {
     LEVEL.store(level.clamp(1, 9), std::sync::atomic::Ordering::Relaxed);

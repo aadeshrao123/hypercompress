@@ -26,7 +26,7 @@ enum Commands {
         /// Output .hc file (default: input_name.hc)
         output: Option<PathBuf>,
         /// Compression level 1-9 (1=fastest, 6=default, 9=best)
-        #[arg(short, long, default_value = "6")]
+        #[arg(short, long, default_value = "4")]
         level: u32,
         /// Encrypt with password (AES-256-GCM)
         #[arg(short, long)]
