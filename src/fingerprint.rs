@@ -71,7 +71,7 @@ impl Fingerprint {
     }
 
     pub fn classify(&self) -> DataType {
-        if self.entropy > 7.5 {
+        if self.entropy > 7.9 {
             return DataType::CompressedOrRandom;
         }
 

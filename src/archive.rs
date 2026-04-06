@@ -18,6 +18,13 @@ use std::fs;
 use std::io::{self, Cursor, Write};
 use std::path::Path;
 
+use rayon::prelude::*;
+
+enum WorkItem {
+    Single(usize),
+    Solid(Vec<usize>),
+}
+
 const ARCHIVE_MAGIC: [u8; 4] = [b'H', b'C', b'A', b'R'];
 const ARCHIVE_VERSION: u16 = 3;
 
@@ -48,21 +55,37 @@ pub fn compress_folder(input: &Path, output: &Path) -> io::Result<FolderStats> {
 
     let mut compressed: Vec<(String, u64, Vec<u8>)> = Vec::new();
 
-    let use_solid = crate::compress::get_level() >= 5;
+    let solid_cap = solid_cap_for_level(crate::compress::get_level());
 
+    // flatten into work items, then compress in parallel
+    let mut work: Vec<WorkItem> = Vec::new();
     for group in &groups {
-        if group.len() == 1 || !use_solid {
-            for &idx in group {
-                let (path, data) = &entries[idx];
-                let comp = compress_single(data);
-                compressed.push((path.clone(), data.len() as u64, comp));
+        for subgroup in split_solid_group(group, &entries, solid_cap) {
+            if subgroup.len() == 1 {
+                work.push(WorkItem::Single(subgroup[0]));
+            } else {
+                work.push(WorkItem::Solid(subgroup));
             }
-        } else {
-            let solid = compress_solid_group(&entries, group);
-            for (i, &idx) in group.iter().enumerate() {
-                let (path, data) = &entries[idx];
-                compressed.push((path.clone(), data.len() as u64, solid[i].clone()));
+        }
+    }
+
+    let results: Vec<Vec<(usize, Vec<u8>)>> = work.par_iter().map(|item| {
+        match item {
+            WorkItem::Single(idx) => {
+                let comp = compress_single(&entries[*idx].1);
+                vec![(*idx, comp)]
             }
+            WorkItem::Solid(indices) => {
+                let solid = compress_solid_group(&entries, indices);
+                indices.iter().zip(solid).map(|(&idx, s)| (idx, s)).collect()
+            }
+        }
+    }).collect();
+
+    for batch in results {
+        for (idx, comp) in batch {
+            let (path, data) = &entries[idx];
+            compressed.push((path.clone(), data.len() as u64, comp));
         }
     }
 
@@ -99,9 +122,12 @@ pub fn compress_folder(input: &Path, output: &Path) -> io::Result<FolderStats> {
 }
 
 fn compress_single(data: &[u8]) -> Vec<u8> {
+    let level = crate::compress::get_level();
     let mut comp = Vec::new();
     let _ = crate::compress::compress(data, &mut comp);
-    if comp.len() < data.len() {
+
+    // at level 3+, also try direct LZMA on the file (often beats chunked)
+    let mut best = if comp.len() < data.len() {
         let mut buf = Vec::with_capacity(1 + comp.len());
         buf.push(0x01);
         buf.extend_from_slice(&comp);
@@ -111,51 +137,132 @@ fn compress_single(data: &[u8]) -> Vec<u8> {
         buf.push(0x00);
         buf.extend_from_slice(data);
         buf
+    };
+
+    if level >= 3 && data.len() > 1024 {
+        let lzma = crate::entropy::lzma_for_level(data, level);
+        if 1 + lzma.len() < best.len() {
+            best = Vec::with_capacity(1 + lzma.len());
+            best.push(0x07); // direct LZMA marker
+            best.extend_from_slice(&lzma);
+        }
     }
+
+    best
 }
 
 fn compress_solid_group(entries: &[(String, Vec<u8>)], indices: &[usize]) -> Vec<Vec<u8>> {
-    // concatenate all files in the group
+    let level = crate::compress::get_level();
+
     let mut concat = Vec::new();
-    let mut offsets: Vec<u64> = Vec::new();
     for &idx in indices {
-        offsets.push(concat.len() as u64);
         concat.extend_from_slice(&entries[idx].1);
     }
 
-    let mut solid_compressed = Vec::new();
-    let _ = crate::compress::compress(&concat, &mut solid_compressed);
+    // direct LZMA on concatenated stream
+    let solid_compressed = solid_lzma(&concat, level);
+    let solid_overhead = 5 + indices.len() * 8;
+    let solid_total = solid_compressed.len() + solid_overhead;
 
-    // if solid didn't help, fall back to individual compression
-    let individual_total: usize = indices.iter()
-        .map(|&idx| compress_single(&entries[idx].1).len())
-        .sum();
+    // quick individual estimate: just check first file to decide
+    let first_ind = compress_single(&entries[indices[0]].1);
+    let est_individual = first_ind.len() * indices.len();
 
-    if solid_compressed.len() + 20 >= individual_total {
-        // solid didn't win, use individual
-        return indices.iter()
+    if solid_total < est_individual {
+        // solid wins — use it
+        let mut result = Vec::new();
+        let mut header = Vec::new();
+        header.push(0x02);
+        header.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        for &idx in indices {
+            header.extend_from_slice(&(entries[idx].1.len() as u64).to_le_bytes());
+        }
+        header.extend_from_slice(&solid_compressed);
+        result.push(header);
+        for _ in 1..indices.len() {
+            result.push(vec![0x03]);
+        }
+        result
+    } else {
+        // solid didn't win — compress individually
+        indices.iter()
             .map(|&idx| compress_single(&entries[idx].1))
-            .collect();
+            .collect()
+    }
+}
+
+fn solid_lzma(data: &[u8], level: u32) -> Vec<u8> {
+    let mut best_data = Vec::new();
+    let mut best_marker = 0u8;
+    let mut best_len = data.len();
+
+    // try delta+LZMA (audio, numeric)
+    let delta = crate::transform::delta::encode(data);
+    let delta_lzma = crate::entropy::lzma_for_level(&delta, level);
+    if delta_lzma.len() < best_len {
+        let dec = crate::entropy::decode(&delta_lzma, crate::format::CodecType::Lzma);
+        let restored = crate::transform::delta::decode(&dec);
+        if restored.len() >= data.len() && restored[..data.len()] == data[..] {
+            best_len = delta_lzma.len();
+            best_data = delta_lzma;
+            best_marker = 0x04;
+        }
     }
 
-    // solid wins — first file gets the blob, rest get references
+    // try raw LZMA (always — this is what xz does)
+    let raw_lzma = crate::entropy::lzma_for_level(data, level);
+    if raw_lzma.len() < best_len {
+        best_len = raw_lzma.len();
+        best_data = raw_lzma;
+        best_marker = 0x05;
+    }
+
+    if best_marker != 0 {
+        let mut out = Vec::with_capacity(1 + best_data.len());
+        out.push(best_marker);
+        out.extend_from_slice(&best_data);
+        return out;
+    }
+
+    // nothing compressed — chunk-based fallback
+    let mut comp = Vec::new();
+    let _ = crate::compress::compress(data, &mut comp);
+    let mut out = Vec::with_capacity(1 + comp.len());
+    out.push(0x06);
+    out.extend_from_slice(&comp);
+    out
+}
+
+fn solid_cap_for_level(level: u32) -> usize {
+    // 7-Zip uses 64MB solid blocks even at level 1, 16GB at level 9.
+    // Low levels: per-file parallel for speed.
+    // High levels: solid streaming for ratio (cross-file dictionary).
+    match level {
+        0..=4 => 0,
+        5 => 128 * 1024 * 1024,
+        6 => 512 * 1024 * 1024,
+        _ => 2 * 1024 * 1024 * 1024, // 2GB
+    }
+}
+
+fn split_solid_group(group: &[usize], entries: &[(String, Vec<u8>)], cap: usize) -> Vec<Vec<usize>> {
     let mut result = Vec::new();
+    let mut cur = Vec::new();
+    let mut cur_size = 0usize;
 
-    // first entry: marker 0x02 + group count + per-file sizes + compressed blob
-    let mut header = Vec::new();
-    header.push(0x02);
-    header.extend_from_slice(&(indices.len() as u32).to_le_bytes());
-    for &idx in indices {
-        header.extend_from_slice(&(entries[idx].1.len() as u64).to_le_bytes());
+    for &idx in group {
+        let fsize = entries[idx].1.len();
+        if !cur.is_empty() && cur_size + fsize > cap {
+            result.push(cur);
+            cur = Vec::new();
+            cur_size = 0;
+        }
+        cur.push(idx);
+        cur_size += fsize;
     }
-    header.extend_from_slice(&solid_compressed);
-    result.push(header);
-
-    // remaining entries: marker 0x03 (part of solid group, data in first entry)
-    for _ in 1..indices.len() {
-        result.push(vec![0x03]);
+    if !cur.is_empty() {
+        result.push(cur);
     }
-
     result
 }
 
@@ -236,6 +343,8 @@ fn decompress_v2v3(data: &[u8], output_dir: &Path) -> io::Result<Vec<ArchiveEntr
         } else if cd[0] == 0x01 {
             let mut cursor = Cursor::new(&cd[1..]);
             crate::decompress::decompress(&mut cursor).unwrap_or_else(|_| cd[1..].to_vec())
+        } else if cd[0] == 0x07 {
+            crate::entropy::decode(&cd[1..], crate::format::CodecType::Lzma)
         } else if cd[0] == 0x02 {
             // solid group header
             if cd.len() < 5 { Vec::new() } else {
@@ -247,9 +356,7 @@ fn decompress_v2v3(data: &[u8], output_dir: &Path) -> io::Result<Vec<ArchiveEntr
                     solid_sizes.push(u64::from_le_bytes(cd[spos..spos + 8].try_into().unwrap()));
                     spos += 8;
                 }
-                // decompress the solid blob
-                let mut cursor = Cursor::new(&cd[spos..]);
-                let full = crate::decompress::decompress(&mut cursor).unwrap_or_default();
+                let full = decompress_solid_blob(&cd[spos..]);
                 solid_offset = 0;
                 let sz = solid_sizes.first().copied().unwrap_or(0) as usize;
                 let chunk = full[solid_offset..solid_offset + sz.min(full.len())].to_vec();
@@ -284,6 +391,31 @@ fn decompress_v2v3(data: &[u8], output_dir: &Path) -> io::Result<Vec<ArchiveEntr
     }
 
     Ok(entries)
+}
+
+fn decompress_solid_blob(blob: &[u8]) -> Vec<u8> {
+    if blob.is_empty() { return Vec::new(); }
+    match blob[0] {
+        0x04 => {
+            // delta + LZMA
+            let dec = crate::entropy::decode(&blob[1..], crate::format::CodecType::Lzma);
+            crate::transform::delta::decode(&dec)
+        }
+        0x05 => {
+            // raw LZMA
+            crate::entropy::decode(&blob[1..], crate::format::CodecType::Lzma)
+        }
+        0x06 => {
+            // chunk-based compression
+            let mut cursor = Cursor::new(&blob[1..]);
+            crate::decompress::decompress(&mut cursor).unwrap_or_default()
+        }
+        _ => {
+            // old format: try chunk-based decompression
+            let mut cursor = Cursor::new(blob);
+            crate::decompress::decompress(&mut cursor).unwrap_or_default()
+        }
+    }
 }
 
 pub fn is_archive_file(path: &Path) -> bool {

@@ -1,8 +1,15 @@
 use crate::format::DataType;
 
-pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 pub const MIN_CHUNK_SIZE: usize = 4 * 1024;
-pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
+
+pub fn chunk_size_for_level(level: u32) -> usize {
+    match level {
+        0..=2 => 256 * 1024,
+        3..=4 => 1024 * 1024,
+        5..=6 => 4 * 1024 * 1024,
+        _ => 8 * 1024 * 1024,
+    }
+}
 
 #[derive(Debug)]
 pub struct Chunk {
@@ -15,10 +22,11 @@ pub struct Chunk {
 /// larger files use fixed-size chunks.
 pub fn split_into_chunks(data: &[u8], chunk_size: usize) -> Vec<Chunk> {
     if data.len() <= chunk_size * 2 {
-        return split_adaptive(data);
+        return split_adaptive(data, chunk_size);
     }
 
-    let size = chunk_size.clamp(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE);
+    let max = chunk_size * 4;
+    let size = chunk_size.clamp(MIN_CHUNK_SIZE, max);
     let mut chunks = Vec::new();
     let mut off = 0usize;
 
@@ -36,7 +44,7 @@ pub fn split_into_chunks(data: &[u8], chunk_size: usize) -> Vec<Chunk> {
 }
 
 /// Scan for data type transitions (entropy/zero-ratio shifts) and split there.
-fn split_adaptive(data: &[u8]) -> Vec<Chunk> {
+fn split_adaptive(data: &[u8], max_chunk: usize) -> Vec<Chunk> {
     if data.is_empty() {
         return Vec::new();
     }
@@ -91,7 +99,7 @@ fn split_adaptive(data: &[u8]) -> Vec<Chunk> {
             chunk_start = curr.0;
         }
 
-        if chunk_len >= MAX_CHUNK_SIZE {
+        if chunk_len >= max_chunk {
             chunks.push(Chunk {
                 data: data[chunk_start..curr.0].to_vec(),
                 original_offset: chunk_start as u64,
@@ -119,13 +127,14 @@ mod tests {
     #[test]
     fn splits_large_data() {
         let data = vec![0u8; 600_000];
-        let chunks = split_into_chunks(&data, DEFAULT_CHUNK_SIZE);
+        let sz = chunk_size_for_level(1);
+        let chunks = split_into_chunks(&data, sz);
         assert!(chunks.len() >= 2 && chunks.len() <= 4);
     }
 
     #[test]
     fn keeps_small_data_together() {
-        let chunks = split_into_chunks(&vec![42u8; 100], DEFAULT_CHUNK_SIZE);
+        let chunks = split_into_chunks(&vec![42u8; 100], chunk_size_for_level(4));
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].data.len(), 100);
     }
@@ -138,13 +147,13 @@ mod tests {
         }
         data.extend_from_slice(&vec![0u8; 50_000]);
 
-        let chunks = split_into_chunks(&data, DEFAULT_CHUNK_SIZE);
+        let chunks = split_into_chunks(&data, chunk_size_for_level(1));
         assert!(chunks.len() >= 2, "got {} chunks", chunks.len());
     }
 
     #[test]
     fn uniform_stays_single() {
-        let chunks = split_into_chunks(&vec![42u8; 300_000], DEFAULT_CHUNK_SIZE);
+        let chunks = split_into_chunks(&vec![42u8; 300_000], chunk_size_for_level(4));
         assert_eq!(chunks.len(), 1);
     }
 }

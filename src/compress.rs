@@ -26,7 +26,8 @@ pub fn compress<W: Write>(data: &[u8], writer: &mut W) -> io::Result<CompressSta
     stats.original_size = data.len() as u64;
     let level = get_level();
 
-    let mut chunks = chunk::split_into_chunks(data, chunk::DEFAULT_CHUNK_SIZE);
+    let chunk_sz = chunk::chunk_size_for_level(level);
+    let mut chunks = chunk::split_into_chunks(data, chunk_sz);
 
     // level 1-2: skip fingerprinting on high-entropy chunks (gzip doesn't fingerprint at all)
     if level >= 3 {
@@ -55,9 +56,9 @@ pub fn compress<W: Write>(data: &[u8], writer: &mut W) -> io::Result<CompressSta
         + compressed_chunks.len() * ChunkMeta::SIZE;
     let approach_a = per_chunk_overhead + per_chunk_data;
 
-    // only try whole-file LZMA at level 7+ (expensive comparison)
-    let approach_b = if data.len() >= 256 && level >= 7 {
-        try_whole_file_lzma(data)
+    // try whole-file LZMA at level 4+ — single stream beats chunking on uniform data
+    let approach_b = if data.len() >= 256 && level >= 4 {
+        try_whole_file_lzma(data, level)
     } else {
         None
     };
@@ -93,9 +94,9 @@ fn compress_chunk(chunk: &Chunk, level: u32) -> CompressedChunk {
     match level {
         1..=2 => compress_fast(chunk, checksum),
         3 => compress_balanced(chunk, checksum),
-        4..=5 => compress_normal(chunk, checksum),
-        6..=7 => compress_good(chunk, checksum),
-        _ => compress_best(chunk, checksum),
+        4..=5 => compress_normal(chunk, checksum, level),
+        6..=7 => compress_good(chunk, checksum, level),
+        _ => compress_best(chunk, checksum, level),
     }
 }
 
@@ -141,33 +142,20 @@ fn verify_if_needed(original: &[u8], encoded: &[u8], tf: TransformType, codec: C
     restored.len() >= original.len() && restored[..original.len()] == original[..]
 }
 
-// Level 4-5: transform + fast LZMA (preset 1, multithreaded). Like 7-Zip Normal.
-fn compress_normal(chunk: &Chunk, checksum: u32) -> CompressedChunk {
+fn compress_normal(chunk: &Chunk, checksum: u32, level: u32) -> CompressedChunk {
     let tf = transform::select_transform(chunk.data_type);
     let transformed = transform::apply_transform(&chunk.data, tf);
+    let lzma_out = entropy::lzma_for_level(&transformed, level);
 
-    // use fast LZMA (preset 1) — good ratio at reasonable speed
-    let lzma_out = entropy::lzma_fast(&transformed);
-
-    if lzma_out.len() < chunk.data.len() {
-        if tf != TransformType::None {
-            let dec = entropy::decode(&lzma_out, CodecType::Lzma);
-            let restored = transform::reverse_transform(&dec, tf);
-            if restored.len() >= chunk.data.len() && restored[..chunk.data.len()] == chunk.data[..] {
-                return CompressedChunk { data: lzma_out, transform: tf, codec: CodecType::Lzma, checksum };
-            }
-        } else {
-            return CompressedChunk { data: lzma_out, transform: tf, codec: CodecType::Lzma, checksum };
-        }
+    if lzma_out.len() < chunk.data.len() && verify_if_needed(&chunk.data, &lzma_out, tf, CodecType::Lzma) {
+        return CompressedChunk { data: lzma_out, transform: tf, codec: CodecType::Lzma, checksum };
     }
 
-    // fallback: no transform + fast LZMA
-    let raw_lzma = entropy::lzma_fast(&chunk.data);
+    let raw_lzma = entropy::lzma_for_level(&chunk.data, level);
     if raw_lzma.len() < chunk.data.len() {
         return CompressedChunk { data: raw_lzma, transform: TransformType::None, codec: CodecType::Lzma, checksum };
     }
 
-    // fallback: fast codecs
     let (codec, encoded) = entropy::select_fast_codec(&chunk.data);
     if encoded.len() < chunk.data.len() {
         CompressedChunk { data: encoded, transform: TransformType::None, codec, checksum }
@@ -176,8 +164,7 @@ fn compress_normal(chunk: &Chunk, checksum: u32) -> CompressedChunk {
     }
 }
 
-// Level 6-7: primary transform + no-transform, pick smaller. Verify roundtrip.
-fn compress_good(chunk: &Chunk, checksum: u32) -> CompressedChunk {
+fn compress_good(chunk: &Chunk, checksum: u32, _level: u32) -> CompressedChunk {
     let raw_size = chunk.data.len();
     let primary = transform::select_transform(chunk.data_type);
 
@@ -188,25 +175,21 @@ fn compress_good(chunk: &Chunk, checksum: u32) -> CompressedChunk {
 
     for &tf in &[primary, TransformType::None] {
         let input = if tf == TransformType::None { chunk.data.clone() } else { transform::apply_transform(&chunk.data, tf) };
-        let (codec, encoded) = entropy::select_best_codec(&input);
 
-        if encoded.len() < best_size {
-            let dec = entropy::decode(&encoded, codec);
-            let restored = transform::reverse_transform(&dec, tf);
-            if restored.len() >= chunk.data.len() && restored[..chunk.data.len()] == chunk.data[..] {
-                best_size = encoded.len();
-                best_tf = tf;
-                best_codec = codec;
-                best_data = encoded;
-            }
+        // select_best_codec already tries LZMA internally
+        let (codec, encoded) = entropy::select_best_codec(&input);
+        if encoded.len() < best_size && verify_if_needed(&chunk.data, &encoded, tf, codec) {
+            best_size = encoded.len();
+            best_tf = tf;
+            best_codec = codec;
+            best_data = encoded;
         }
     }
 
     CompressedChunk { data: best_data, transform: best_tf, codec: best_codec, checksum }
 }
 
-// Level 7-9: try all plausible transforms × all codecs. Like 7-Zip "Ultra".
-fn compress_best(chunk: &Chunk, checksum: u32) -> CompressedChunk {
+fn compress_best(chunk: &Chunk, checksum: u32, level: u32) -> CompressedChunk {
     let raw_size = chunk.data.len();
     let primary = transform::select_transform(chunk.data_type);
     let mut candidates = vec![TransformType::None, primary];
@@ -236,56 +219,102 @@ fn compress_best(chunk: &Chunk, checksum: u32) -> CompressedChunk {
 
     for &tf in &candidates {
         let transformed = transform::apply_transform(&chunk.data, tf);
-        let (codec, encoded) = entropy::select_best_codec(&transformed);
 
-        if encoded.len() < best_size {
+        let (codec, encoded) = entropy::select_best_codec(&transformed);
+        if encoded.len() < best_size && verify_if_needed(&chunk.data, &encoded, tf, codec) {
             best_size = encoded.len();
             best_tf = tf;
             best_codec = codec;
             best_data = encoded;
+        }
+
+        // at ultra levels, also try direct LZMA on each transform
+        let lzma = entropy::lzma_for_level(&transformed, level);
+        if lzma.len() < best_size && verify_if_needed(&chunk.data, &lzma, tf, CodecType::Lzma) {
+            best_size = lzma.len();
+            best_tf = tf;
+            best_codec = CodecType::Lzma;
+            best_data = lzma;
         }
     }
 
     CompressedChunk { data: best_data, transform: best_tf, codec: best_codec, checksum }
 }
 
-fn try_whole_file_lzma(data: &[u8]) -> Option<(Vec<u8>, usize, TransformType)> {
+fn try_whole_file_lzma(data: &[u8], level: u32) -> Option<(Vec<u8>, usize, TransformType)> {
     let overhead = FileHeader::SIZE + 6;
     let fp = crate::fingerprint::Fingerprint::compute(data);
-
-    if fp.entropy > 7.9 { return None; }
-
     let dtype = fp.classify();
-    if dtype == DataType::CompressedOrRandom || fp.entropy > 7.0 {
-        let lzma = entropy::encode(data, CodecType::Lzma);
-        return if lzma.len() < data.len() * 97 / 100 {
-            Some((lzma, overhead, TransformType::None))
-        } else {
-            None
-        };
+
+    if dtype == DataType::CompressedOrRandom { return None; }
+
+    // for large files at low levels, just try delta+LZMA (fast path for audio)
+    if level <= 5 && data.len() > 4 * 1024 * 1024 {
+        return try_lzma_fast_path(data, level, dtype, overhead);
     }
 
     let mut best: Option<(Vec<u8>, TransformType)> = None;
 
-    let lzma_raw = entropy::encode(data, CodecType::Lzma);
+    let lzma_raw = entropy::lzma_for_level(data, level);
     if lzma_raw.len() < data.len() {
         best = Some((lzma_raw, TransformType::None));
     }
 
     let tf = transform::select_transform(dtype);
-    if tf != TransformType::None {
-        let transformed = transform::apply_transform(data, tf);
-        let lzma_tf = entropy::encode(&transformed, CodecType::Lzma);
-        if lzma_tf.len() < best.as_ref().map(|(d, _)| d.len()).unwrap_or(data.len()) {
+    let transforms = if level >= 6 {
+        vec![tf, TransformType::Delta, TransformType::Prediction]
+    } else {
+        vec![tf, TransformType::Delta]
+    };
+
+    for &t in &transforms {
+        if t == TransformType::None { continue; }
+        let transformed = transform::apply_transform(data, t);
+        let lzma_tf = entropy::lzma_for_level(&transformed, level);
+        let cur_best = best.as_ref().map(|(d, _)| d.len()).unwrap_or(data.len());
+        if lzma_tf.len() < cur_best {
             let dec = entropy::decode(&lzma_tf, CodecType::Lzma);
-            let restored = transform::reverse_transform(&dec, tf);
+            let restored = transform::reverse_transform(&dec, t);
             if restored.len() >= data.len() && restored[..data.len()] == data[..] {
-                best = Some((lzma_tf, tf));
+                best = Some((lzma_tf, t));
             }
         }
     }
 
     best.map(|(d, tf)| (d, overhead, tf))
+}
+
+fn try_lzma_fast_path(data: &[u8], level: u32, dtype: DataType, overhead: usize) -> Option<(Vec<u8>, usize, TransformType)> {
+    let tf = match dtype {
+        DataType::Binary | DataType::NumericInt => TransformType::Delta,
+        _ => transform::select_transform(dtype),
+    };
+
+    // use preset 1 for speed on large data at Normal
+    let fast_lzma = |d: &[u8]| -> Vec<u8> {
+        entropy::lzma_mt(d, 1).unwrap_or_else(|| entropy::lzma_st(d, 1))
+    };
+
+    let mut best: Option<(Vec<u8>, TransformType)> = None;
+
+    if tf != TransformType::None {
+        let transformed = transform::apply_transform(data, tf);
+        let lzma = fast_lzma(&transformed);
+        if lzma.len() < data.len() {
+            let dec = entropy::decode(&lzma, CodecType::Lzma);
+            let restored = transform::reverse_transform(&dec, tf);
+            if restored.len() >= data.len() && restored[..data.len()] == data[..] {
+                best = Some((lzma, tf));
+            }
+        }
+    }
+
+    let lzma_raw = fast_lzma(data);
+    if lzma_raw.len() < best.as_ref().map(|(d, _)| d.len()).unwrap_or(data.len()) {
+        best = Some((lzma_raw, TransformType::None));
+    }
+
+    best.map(|(d, t)| (d, overhead, t))
 }
 
 fn write_single_chunk<W: Write>(original: &[u8], compressed: &[u8], tf: TransformType, writer: &mut W, stats: &mut CompressStats) -> io::Result<()> {

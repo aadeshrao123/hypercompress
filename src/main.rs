@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::io::{BufWriter, Cursor};
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Instant;
 

@@ -28,7 +28,7 @@ pub fn encode(data: &[u8], codec: CodecType) -> Vec<u8> {
             order1::encode(data).unwrap_or_else(|| data.to_vec())
         }
         CodecType::LzOptimal => lz_optimal::compress(data),
-        CodecType::Lzma => lzma_compress(data),
+        CodecType::Lzma => lzma_for_level(data, crate::compress::get_level()),
     }
 }
 
@@ -47,73 +47,72 @@ pub fn decode(data: &[u8], codec: CodecType) -> Vec<u8> {
     }
 }
 
-/// Fast LZMA: preset 1, multithreaded. Good ratio at reasonable speed.
-pub fn lzma_fast(data: &[u8]) -> Vec<u8> {
+// LZMA preset mapping.
+// Levels 1-4: cap preset on large data for speed (user wants fast).
+// Levels 5+: no cap — user chose slow mode, give them full power.
+// 7-Zip at level 9 uses dict=512MB. xz -9 uses dict=64MB (preset 9).
+fn lzma_preset(level: u32, data_len: usize) -> u32 {
+    let base = match level {
+        0..=2 => 1,
+        3 => 1,
+        4 => 2,
+        5 => 3,
+        6 => 5,
+        7 => 6,
+        8 => 7,
+        _ => 9,
+    };
+    // only cap at speed-focused levels (1-4)
+    if level <= 4 {
+        if data_len > 32 * 1024 * 1024 { base.min(2) }
+        else if data_len > 8 * 1024 * 1024 { base.min(3) }
+        else { base }
+    } else {
+        base
+    }
+}
+
+pub fn lzma_for_level(data: &[u8], level: u32) -> Vec<u8> {
+    let preset = lzma_preset(level, data.len());
+    lzma_mt(data, preset).unwrap_or_else(|| lzma_st(data, preset))
+}
+
+pub fn lzma_mt(data: &[u8], preset: u32) -> Option<Vec<u8>> {
     use std::io::Write;
     use xz2::stream::MtStreamBuilder;
 
-    if data.len() > 64 * 1024 {
-        if let Some(out) = MtStreamBuilder::new()
-            .preset(1)
-            .threads(num_cpus())
-            .encoder()
-            .ok()
-            .and_then(|s| {
-                let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), s);
-                enc.write_all(data).ok()?;
-                enc.finish().ok()
-            })
-        {
-            if out.len() < data.len() { return out; }
-        }
+    if data.len() < 64 * 1024 { return None; }
+
+    let stream = MtStreamBuilder::new()
+        .preset(preset)
+        .threads(num_cpus())
+        .encoder()
+        .ok()?;
+    let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
+    enc.write_all(data).ok()?;
+    enc.finish().ok().filter(|out| out.len() < data.len())
+}
+
+pub fn lzma_st(data: &[u8], preset: u32) -> Vec<u8> {
+    use std::io::Write;
+
+    let ascii = data.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count() as f64
+        / data.len().max(1) as f64;
+    let (lc, lp, pb) = if ascii > 0.8 { (3, 0, 0) }
+        else if data.len() % 4 == 0 && ascii < 0.3 { (0, 2, 2) }
+        else { (3, 0, 2) };
+
+    if let Some(out) = lzma_with_params(data, preset, lc, lp, pb) {
+        if out.len() < data.len() { return out; }
     }
 
-    // fallback: single-threaded preset 1
-    use xz2::write::XzEncoder;
-    let mut enc = XzEncoder::new(Vec::new(), 1);
+    let mut enc = xz2::write::XzEncoder::new(Vec::new(), preset);
     if enc.write_all(data).is_ok() {
         if let Ok(out) = enc.finish() {
             if out.len() < data.len() { return out; }
         }
     }
     data.to_vec()
-}
-
-fn lzma_compress(data: &[u8]) -> Vec<u8> {
-    use std::io::Write;
-    use xz2::stream::MtStreamBuilder;
-
-    // scale preset by data size — big files get faster presets
-    let preset = if data.len() > 4 * 1024 * 1024 { 3 }
-        else if data.len() > 512 * 1024 { 5 }
-        else { 6 };
-
-    // large data: use multithreaded encoder (fastest path)
-    if data.len() > 256 * 1024 {
-        if let Some(out) = MtStreamBuilder::new()
-            .preset(preset)
-            .threads(num_cpus())
-            .encoder()
-            .ok()
-            .and_then(|stream| {
-                let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
-                enc.write_all(data).ok()?;
-                enc.finish().ok()
-            })
-        {
-            if out.len() < data.len() { return out; }
-        }
-    }
-
-    // small data: try tuned params
-    let ascii = data.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count() as f64
-        / data.len().max(1) as f64;
-
-    let (lc, lp, pb) = if ascii > 0.8 { (3, 0, 0) }
-        else if data.len() % 4 == 0 && ascii < 0.3 { (0, 2, 2) }
-        else { (3, 0, 2) };
-
-    lzma_with_params(data, preset, lc, lp, pb).unwrap_or_else(|| data.to_vec())
 }
 
 fn lzma_with_params(data: &[u8], preset: u32, lc: u32, lp: u32, pb: u32) -> Option<Vec<u8>> {
@@ -131,6 +130,11 @@ fn lzma_with_params(data: &[u8], preset: u32, lc: u32, lp: u32, pb: u32) -> Opti
     let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
     enc.write_all(data).ok()?;
     enc.finish().ok()
+}
+
+pub fn lzma_fast(data: &[u8]) -> Vec<u8> {
+    let level = crate::compress::get_level();
+    lzma_for_level(data, level.min(4))
 }
 
 fn num_cpus() -> u32 {
@@ -268,11 +272,21 @@ fn emit_match_turbo(offset: usize, length: usize, out: &mut Vec<u8>) {
     }
 }
 
-/// Level 3-4: LZ + ANS + LzAns. No LZMA, no optimal parsing.
+/// Level 3-4: LZ + ANS + LzAns + LZMA on high-entropy.
 pub fn select_fast_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
     if data.is_empty() { return (CodecType::Raw, Vec::new()); }
     let ent = quick_entropy(data);
-    if ent > 7.5 { return (CodecType::Raw, data.to_vec()); }
+    let level = crate::compress::get_level();
+
+    // high entropy: try LZMA instead of giving up
+    if ent > 7.0 {
+        let lzma = lzma_for_level(data, level);
+        return if lzma.len() < data.len() {
+            (CodecType::Lzma, lzma)
+        } else {
+            (CodecType::Raw, data.to_vec())
+        };
+    }
 
     let mut best = (CodecType::Raw, data.to_vec(), data.len());
     let try_c = |b: &mut (CodecType, Vec<u8>, usize), c: CodecType, e: Vec<u8>| {
@@ -292,6 +306,11 @@ pub fn select_fast_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         }
     }
 
+    // try LZMA if fast codecs didn't do well enough
+    if best.2 > data.len() * 70 / 100 {
+        try_c(&mut best, CodecType::Lzma, lzma_for_level(data, level));
+    }
+
     (best.0, best.1)
 }
 
@@ -302,10 +321,7 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
     }
 
     let ent = quick_entropy(data);
-    if ent > 7.8 {
-        return (CodecType::Raw, data.to_vec());
-    }
-
+    let level = crate::compress::get_level();
     let mut best = (CodecType::Raw, data.to_vec(), data.len());
 
     fn try_codec(best: &mut (CodecType, Vec<u8>, usize), codec: CodecType, encoded: Vec<u8>) {
@@ -316,17 +332,22 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         }
     }
 
-    let level = crate::compress::get_level();
+    // high entropy: always try LZMA (it handles near-random better than our codecs)
+    if ent > 7.5 {
+        try_codec(&mut best, CodecType::Lzma, lzma_for_level(data, level));
+        return (best.0, best.1);
+    }
 
-    // high entropy: skip custom codecs, just try LZMA if level allows
-    if ent > 5.5 {
-        if level >= 4 {
-            try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+    // medium-high entropy: LZMA only, skip custom codecs
+    if ent > 6.0 {
+        try_codec(&mut best, CodecType::Lzma, lzma_for_level(data, level));
+        if level >= 6 {
+            try_codec(&mut best, CodecType::Ans, ans::encode(data));
         }
         return (best.0, best.1);
     }
 
-    // fast codecs — always run (they're what make us fast + good)
+    // low-medium entropy: try everything
     try_codec(&mut best, CodecType::Ans, ans::encode(data));
 
     let lz_out = lz_encode(data);
@@ -337,20 +358,19 @@ pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
         try_codec(&mut best, CodecType::LzAns, ans::encode(&lz_out));
     }
 
-    // mid-tier codecs — level 3+
-    if level >= 3 && data.len() >= 64 {
+    if data.len() >= 64 {
         if let Some(o1) = order1::encode(data) {
             try_codec(&mut best, CodecType::Order1, o1);
         }
     }
 
-    if level >= 3 && data.len() >= 32 {
+    if data.len() >= 32 {
         try_codec(&mut best, CodecType::LzOptimal, lz_optimal::compress(data));
     }
 
-    // only try LZMA (expensive) if fast codecs didn't compress well (<40% reduction)
-    if best.2 > data.len() * 60 / 100 {
-        try_codec(&mut best, CodecType::Lzma, lzma_compress(data));
+    // always try LZMA at level 5+ or if fast codecs didn't compress well
+    if level >= 5 || best.2 > data.len() * 60 / 100 {
+        try_codec(&mut best, CodecType::Lzma, lzma_for_level(data, level));
     }
 
     (best.0, best.1)
@@ -394,33 +414,51 @@ fn hash4(data: &[u8], pos: usize) -> usize {
     ((v.wrapping_mul(2654435761)) >> (32 - HASH_BITS)) as usize & HASH_MASK
 }
 
-/// Find best match at `pos` by walking the hash chain.
-/// Returns (length, offset) or (0, 0) if no match found.
-fn find_match(data: &[u8], pos: usize, head: &[u32], chain: &[u32], max_chain_depth: usize) -> (usize, usize) {
+const TOO_FAR: usize = 4096;
+const GOOD_MATCH: usize = 32;
+
+fn find_match(data: &[u8], pos: usize, head: &[u32], chain: &[u32], max_chain_depth: usize, prev_len: usize) -> (usize, usize) {
     if pos + MIN_MATCH > data.len() {
         return (0, 0);
     }
     let h = hash4(data, pos);
-    let mut best_len = 0;
-    let mut best_off = 0;
+    let mut best_len = 0usize;
+    let mut best_off = 0usize;
     let mut cp = head[h];
     let mut count = 0;
     let min_pos = pos.saturating_sub(WINDOW_SIZE);
 
-    while cp != u32::MAX && (cp as usize) >= min_pos && count < max_chain_depth {
+    // zlib: quarter chain depth if we already have a good match
+    let depth = if prev_len >= GOOD_MATCH { max_chain_depth >> 2 } else { max_chain_depth };
+
+    while cp != u32::MAX && (cp as usize) >= min_pos && count < depth {
         let j = cp as usize;
         if j < pos {
+            // zlib tail-byte check: reject candidate early without full comparison
+            if best_len >= MIN_MATCH
+                && (data[j + best_len] != data[pos + best_len]
+                    || data[j + best_len - 1] != data[pos + best_len - 1])
+            {
+                cp = chain[j];
+                count += 1;
+                continue;
+            }
+
             let max_len = MAX_MATCH.min(data.len() - pos);
             let mut len = 0;
             while len < max_len && data[j + len] == data[pos + len] {
                 len += 1;
             }
             if len >= MIN_MATCH && len > best_len {
+                // zlib TOO_FAR: discard 3-byte matches at long distances
+                if len == MIN_MATCH && (pos - j) > TOO_FAR {
+                    cp = chain[j];
+                    count += 1;
+                    continue;
+                }
                 best_len = len;
                 best_off = pos - j;
-                if len == max_len {
-                    break;
-                }
+                if len == max_len { break; }
             }
         }
         cp = chain[j];
@@ -435,25 +473,23 @@ fn lz_encode(data: &[u8]) -> Vec<u8> {
     }
 
     let mut result = Vec::with_capacity(data.len());
-
     let mut head = vec![u32::MAX; HASH_SIZE];
     let mut chain = vec![0u32; data.len()];
-
     let mut i = 0;
     let mut lit_start = 0;
+    let mut prev_len = 0usize;
 
     while i < data.len() {
-        let (best_len, best_off) = find_match(data, i, &head, &chain, MAX_CHAIN);
+        let (best_len, best_off) = find_match(data, i, &head, &chain, MAX_CHAIN, prev_len);
 
         let h = hash4(data, i);
         chain[i] = head[h];
         head[h] = i as u32;
 
         if best_len >= MIN_MATCH {
-            // Lazy matching: check if i+1 has an even longer match
             let mut use_match = true;
             if best_len < MAX_MATCH && i + 1 + MIN_MATCH <= data.len() {
-                let (lazy_len, _) = find_match(data, i + 1, &head, &chain, MAX_CHAIN / 2);
+                let (lazy_len, _) = find_match(data, i + 1, &head, &chain, MAX_CHAIN / 2, best_len);
                 if lazy_len > best_len + 1 {
                     use_match = false;
                 }
@@ -463,7 +499,6 @@ fn lz_encode(data: &[u8]) -> Vec<u8> {
                 if i > lit_start {
                     emit_literals(&data[lit_start..i], &mut result);
                 }
-
                 emit_match(best_off, best_len, &mut result);
 
                 for k in 1..best_len {
@@ -474,12 +509,15 @@ fn lz_encode(data: &[u8]) -> Vec<u8> {
                     }
                 }
 
+                prev_len = best_len;
                 i += best_len;
                 lit_start = i;
             } else {
+                prev_len = 0;
                 i += 1;
             }
         } else {
+            prev_len = 0;
             i += 1;
         }
     }

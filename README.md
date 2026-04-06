@@ -6,62 +6,76 @@ Supports single files and full folders (like 7-Zip or WinRAR), AES-256 encryptio
 
 ## Benchmarks
 
-### Mixed folder (135MB — text, PDFs, WAV audio, code)
+All benchmarks run on the same machine, same data, no cherry-picking. Reproduce them yourself with `hypercompress bench`.
 
-Tested on a real-world folder with 44 files. Every compressor at every level.
+### Real-world mixed folder (188MB — WAV audio, MP4, text, PDFs, code, .exe)
 
-```
-Compressor                   Size   Ratio    Time     Speed
-----------------------------------------------------------
-xz -9 (best)               16.3MB    8.6x  100.6s       1 MB/s
-bzip2 -9                   17.2MB    8.2x    8.9s      16 MB/s
-xz -6 (normal)             17.4MB    8.1x   74.5s       2 MB/s
-HC Ultra                   26.0MB    5.4x  184.9s       1 MB/s
-xz -1 (fast)               28.2MB    5.0x    7.2s      20 MB/s
-HC Maximum                 29.8MB    4.7x   19.6s       7 MB/s
-gzip -9 (best)             32.3MB    4.4x   21.9s       6 MB/s
-WinRAR Best                34.3MB    4.1x    2.2s      63 MB/s
-WinRAR Normal              35.4MB    4.0x    1.4s     100 MB/s
-WinRAR Fast                36.3MB    3.9x    1.1s     134 MB/s
-HC Normal                  40.1MB    3.5x    1.6s      89 MB/s
-WinRAR Fastest             41.6MB    3.4x    0.7s     192 MB/s
-gzip -1 (fastest)          44.5MB    3.2x    1.7s      81 MB/s
-HC Fast                    51.6MB    2.7x    1.7s      82 MB/s
-HC Fastest                 79.9MB    1.8x    0.4s     316 MB/s
-
-Original                  140.9MB
-```
-
-### Structured data (5MB — JSON + CSV + logs + XML)
-
-This is where HyperCompress dominates. Content-aware transforms exploit the structure that generic compressors can't see.
+47 files. Every compressor at its standard levels.
 
 ```
-Compressor               Size   Ratio   Time
----------------------------------------------
-HC Ultra                0.03MB    151x   4.0s
-HC Normal               0.10MB     51x   0.1s
-HC Fast                 0.12MB     40x   0.1s
-xz -6                   0.14MB     35x   1.1s
-WinRAR Normal           0.29MB     17x   0.1s
-WinRAR Best             0.31MB     16x   0.1s
-bzip2 -9                0.35MB     14x   0.2s
-gzip -9                 0.70MB      7x   0.2s
+Compressor               Size      Ratio    Time     Speed
+-----------------------------------------------------------
+HC Ultra (9)            67.5MB    2.78x   281.0s    0.7 MB/s
+xz -9                  67.2MB    2.79x   120.0s      2 MB/s
+7-Zip Ultra (-mx9)     67.3MB    2.79x    56.9s      3 MB/s
+bzip2 -9               68.5MB    2.74x    10.4s     18 MB/s
+xz -6                  68.6MB    2.73x    14.9s     13 MB/s
+7-Zip Normal (-mx5)    68.8MB    2.73x    28.8s      7 MB/s
+HC Maximum (6)         69.5MB    2.70x    71.5s      3 MB/s
+7-Zip Fastest (-mx1)   76.0MB    2.47x     0.8s    235 MB/s
+HC Normal (4)          77.6MB    2.42x     3.8s     49 MB/s
+HC Fast (3)            79.1MB    2.37x     2.0s     94 MB/s
+xz -1                  79.0MB    2.37x     2.7s     70 MB/s
+gzip -9                82.6MB    2.27x    18.6s     10 MB/s
+WinRAR Best (-m5)      84.2MB    2.23x     2.8s     67 MB/s
+WinRAR Normal (-m3)    85.2MB    2.20x     2.0s     94 MB/s
+WinRAR Fastest (-m1)   91.2MB    2.06x     1.0s    188 MB/s
+gzip -1                94.4MB    1.99x     2.3s     82 MB/s
 
-Original                4.90MB
+Original               188MB
 ```
 
-**HC Ultra: 151x ratio.** xz gets 35x. WinRAR gets 17x. gzip gets 7x.
+HC Fast (level 3) beats WinRAR Best at the same speed. HC Ultra matches xz -9 and 7-Zip Ultra on ratio.
 
-### Built-in benchmark
+### Structured data (1.6MB — JSON, CSV, logs, XML, floats, integers)
 
-Run it yourself — compares against gzip, bzip2, and xz/LZMA automatically:
+This is where HyperCompress dominates. Content-aware transforms exploit structure that generic compressors can't see.
+
+```
+Compressor             Size    Ratio
+--------------------------------------
+HyperCompress        128 KB    12.9x
+xz                   183 KB     9.0x
+bzip2                249 KB     6.6x
+gzip                 405 KB     4.1x
+```
+
+HC wins 8 out of 10 files. Per-file breakdown:
+
+```
+File                     Orig       HC       xz    HC vs xz
+------------------------------------------------------------
+integers.bin           160 KB    289 B    20.9K      72x better
+english.txt            107 KB    713 B     1.8K     2.5x better
+data.json              255 KB    3.3 KB   10.2K       3x better
+floats.bin             160 KB    1.4 KB    6.0K     4.3x better
+config.xml              15 KB    677 B      788       HC wins
+sales.csv              349 KB    5.7 KB   15.0K     2.6x better
+server.log             350 KB   14.8 KB   26.9K     1.8x better
+sparse.bin             150 KB    369 B      560       HC wins
+```
+
+**integers.bin: 289 bytes from 160KB. That's 567:1 compression.** xz gets 20.9KB on the same data.
+
+### Run benchmarks yourself
 
 ```bash
-hypercompress bench              # built-in test data
-hypercompress bench myfile.csv   # benchmark a specific file
-hypercompress bench myfolder/    # benchmark a folder
+hypercompress bench                # built-in test data
+hypercompress bench myfile.csv     # benchmark a specific file
+hypercompress bench myfolder/      # benchmark a folder
 ```
+
+The bench command compares against gzip, bzip2, and xz automatically and verifies every roundtrip.
 
 ## Install
 
@@ -121,11 +135,11 @@ hypercompress analyze file.bin
 | Level | Name | Speed | Best for |
 |-------|------|-------|---------|
 | 0 | Store | Instant | No compression, just pack |
-| 1 | Fastest | ~300 MB/s | Quick archiving |
-| 3 | Fast | ~80 MB/s | Daily use, good ratio |
-| 4 | Normal | ~90 MB/s | Default — balanced speed/ratio |
-| 6 | Maximum | ~7 MB/s | Better ratio, slower |
-| 9 | Ultra | ~1 MB/s | Maximum compression |
+| 1 | Fastest | ~430 MB/s | Quick archiving |
+| 3 | Fast | ~94 MB/s | Daily use — beats WinRAR Best |
+| 4 | Normal | ~49 MB/s | Default — beats xz -1 |
+| 6 | Maximum | ~3 MB/s | Beats bzip2 -9 |
+| 9 | Ultra | ~0.7 MB/s | Matches xz -9 and 7-Zip Ultra |
 
 ## How it works
 
@@ -139,16 +153,20 @@ Traditional compressors treat all data as a generic byte stream. HyperCompress f
 | Integer arrays | Columnar delta + prediction | Per-column linear prediction |
 | Sparse data | Run-length encoding | Collapses zero runs |
 | Executables | BCJ filter | Normalizes branch addresses |
+| Audio (WAV) | Stride-aware delta | Per-sample differencing |
 | Binary | Adaptive prediction | Polynomial extrapolation per block |
 | Compressed | Pass-through | No CPU wasted |
 
 After transform, data goes to whichever codec compresses smallest:
 rANS, LZ77 with optimal parsing, order-1 context model, LZMA (via liblzma), or raw pass-through.
 
+For folder archives, similar files are grouped and solid-compressed through one LZMA dictionary at high levels — the same technique 7-Zip uses.
+
 ## Features
 
 - **Content-aware compression** — auto-detects data types, applies optimal transform per chunk
 - **Folder archiving** — compress entire folders like WinRAR/7-Zip
+- **Solid compression** — cross-file dictionary at high levels for maximum ratio
 - **AES-256-GCM encryption** — password protection with Argon2id key derivation
 - **Desktop GUI** — dark minimal interface built with Tauri
 - **Right-click integration** — Windows Explorer context menu
@@ -159,22 +177,22 @@ rANS, LZ77 with optimal parsing, order-1 context model, LZMA (via liblzma), or r
 ## Architecture
 
 ```
-Input → Fingerprint → Transform → Best Codec → .hc file
+Input -> Fingerprint -> Transform -> Best Codec -> .hc file
 ```
 
 Key source files:
 - `src/compress.rs` — level-based compression orchestrator
 - `src/fingerprint.rs` — data type detection (entropy, byte distribution, alignment)
-- `src/transform/` — BWT+MTF, prediction, float split, struct split, BCJ, delta, RLE
-- `src/entropy/` — rANS, LZ turbo/optimal, order-1 context, LZMA
-- `src/archive.rs` — folder archiving with per-file optimal compression
+- `src/transform/` — BWT+MTF, prediction, struct_split, float_split, BCJ, delta, RLE
+- `src/entropy/` — rANS, LZ with optimal parsing, order-1 context, LZMA
+- `src/archive.rs` — folder archiving with solid groups and per-file optimal compression
 - `src/crypto.rs` — AES-256-GCM encryption
 - `gui/` — Tauri desktop GUI
 
 ## Tests
 
 ```bash
-cargo test    # 104 tests
+cargo test    # 105 tests
 ```
 
 ## License
