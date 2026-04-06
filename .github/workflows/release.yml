@@ -8,39 +8,35 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # CLI binaries for all platforms
+  cli:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            name: hypercompress-linux-x86_64
+            name: hypercompress-cli-linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            name: hypercompress-linux-aarch64
+            name: hypercompress-cli-linux-aarch64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: hypercompress-windows-x86_64.exe
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            name: hypercompress-windows-aarch64.exe
+            name: hypercompress-cli-windows-x86_64.exe
           - target: x86_64-apple-darwin
             os: macos-latest
-            name: hypercompress-macos-x86_64
+            name: hypercompress-cli-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: hypercompress-macos-aarch64
+            name: hypercompress-cli-macos-aarch64
 
     runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM)
+      - name: Install cross tools (Linux ARM)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
@@ -49,32 +45,65 @@ jobs:
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
-      - name: Build
+      - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename binary (Unix)
+      - name: Rename (Unix)
         if: runner.os != 'Windows'
         run: cp target/${{ matrix.target }}/release/hypercompress ${{ matrix.name }}
 
-      - name: Rename binary (Windows)
+      - name: Rename (Windows)
         if: runner.os == 'Windows'
         run: cp target/${{ matrix.target }}/release/hypercompress.exe ${{ matrix.name }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
 
+  # Windows GUI installer (includes context menu registration)
+  gui-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install GUI deps
+        working-directory: gui
+        run: npm install
+
+      - name: Build GUI
+        working-directory: gui
+        run: npx tauri build
+
+      - name: Collect installers
+        run: |
+          cp gui/src-tauri/target/release/bundle/nsis/HyperCompress_*_x64-setup.exe HyperCompress-windows-x64-setup.exe
+          cp gui/src-tauri/target/release/bundle/msi/HyperCompress_*_x64_en-US.msi HyperCompress-windows-x64.msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HyperCompress-windows-x64-setup.exe
+          path: HyperCompress-windows-x64-setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HyperCompress-windows-x64.msi
+          path: HyperCompress-windows-x64.msi
+
+  # Create GitHub Release with all artifacts
   release:
-    needs: build
+    needs: [cli, gui-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Collect binaries
+      - name: Collect all files
         run: |
           mkdir release
           find artifacts -type f | while read f; do
@@ -82,8 +111,28 @@ jobs:
           done
           ls -la release/
 
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
           generate_release_notes: true
+          body: |
+            ## Downloads
+
+            **CLI (all platforms):**
+            - `hypercompress-cli-linux-x86_64` — Linux (Intel/AMD)
+            - `hypercompress-cli-linux-aarch64` — Linux (ARM64)
+            - `hypercompress-cli-windows-x86_64.exe` — Windows
+            - `hypercompress-cli-macos-x86_64` — macOS (Intel)
+            - `hypercompress-cli-macos-aarch64` — macOS (Apple Silicon)
+
+            **GUI (Windows):**
+            - `HyperCompress-windows-x64-setup.exe` — Windows installer (includes right-click menu)
+            - `HyperCompress-windows-x64.msi` — MSI installer
+
+            ## Quick start
+            ```
+            hypercompress compress myfile.json
+            hypercompress decompress myfile.json.hc
+            hypercompress bench
+            ```
