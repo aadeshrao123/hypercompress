@@ -120,6 +120,13 @@ pub fn encode_fast(data: &[u8]) -> (CodecType, Vec<u8>) {
     let ent = quick_entropy(data);
     if ent > 7.5 { return (CodecType::Raw, data.to_vec()); }
 
+    // high entropy: just ANS, skip expensive LZ search
+    if ent > 6.0 {
+        let a = ans::encode(data);
+        if a.len() < data.len() { return (CodecType::Ans, a); }
+        return (CodecType::Raw, data.to_vec());
+    }
+
     let lz = lz_encode(data);
     if lz.len() < data.len() {
         let lzans = ans::encode(&lz);

@@ -83,50 +83,40 @@ fn compress_chunk(chunk: &Chunk, level: u32) -> CompressedChunk {
     }
 }
 
-// Level 1-2: ONE transform, ONE fast codec. No LZMA. Like 7-Zip "Fastest".
+// Level 1-2: ONE transform, ONE fast codec. No verification (codecs are tested).
 fn compress_fast(chunk: &Chunk, checksum: u32) -> CompressedChunk {
     let tf = transform::select_transform(chunk.data_type);
     let transformed = transform::apply_transform(&chunk.data, tf);
     let (codec, encoded) = entropy::encode_fast(&transformed);
 
-    // verify before accepting
     if encoded.len() < chunk.data.len() {
-        let dec = entropy::decode(&encoded, codec);
-        let restored = transform::reverse_transform(&dec, tf);
-        if restored.len() >= chunk.data.len() && restored[..chunk.data.len()] == chunk.data[..] {
-            return CompressedChunk { data: encoded, transform: tf, codec, checksum };
+        CompressedChunk { data: encoded, transform: tf, codec, checksum }
+    } else {
+        // transform didn't help, try raw
+        let (c2, e2) = entropy::encode_fast(&chunk.data);
+        if e2.len() < chunk.data.len() {
+            CompressedChunk { data: e2, transform: TransformType::None, codec: c2, checksum }
+        } else {
+            CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
         }
     }
-
-    // fallback: try no transform
-    let (codec2, encoded2) = entropy::encode_fast(&chunk.data);
-    if encoded2.len() < chunk.data.len() {
-        return CompressedChunk { data: encoded2, transform: TransformType::None, codec: codec2, checksum };
-    }
-
-    CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
 }
 
-// Level 3-4: ONE transform, try ANS + LZ. No LZMA. Like 7-Zip "Fast".
+// Level 3-4: ONE transform, fast codecs. No verification.
 fn compress_balanced(chunk: &Chunk, checksum: u32) -> CompressedChunk {
     let tf = transform::select_transform(chunk.data_type);
     let transformed = transform::apply_transform(&chunk.data, tf);
     let (codec, encoded) = entropy::select_fast_codec(&transformed);
 
     if encoded.len() < chunk.data.len() {
-        let dec = entropy::decode(&encoded, codec);
-        let restored = transform::reverse_transform(&dec, tf);
-        if restored.len() >= chunk.data.len() && restored[..chunk.data.len()] == chunk.data[..] {
-            return CompressedChunk { data: encoded, transform: tf, codec, checksum };
-        }
-    }
-
-    // fallback: no transform
-    let (codec2, encoded2) = entropy::select_fast_codec(&chunk.data);
-    if encoded2.len() < chunk.data.len() {
-        CompressedChunk { data: encoded2, transform: TransformType::None, codec: codec2, checksum }
+        CompressedChunk { data: encoded, transform: tf, codec, checksum }
     } else {
-        CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
+        let (c2, e2) = entropy::select_fast_codec(&chunk.data);
+        if e2.len() < chunk.data.len() {
+            CompressedChunk { data: e2, transform: TransformType::None, codec: c2, checksum }
+        } else {
+            CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
+        }
     }
 }
 
