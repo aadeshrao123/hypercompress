@@ -30,23 +30,23 @@
 
       <div class="controls">
         <div class="field">
-          <label>Level</label>
-          <div class="slider-wrap">
-            <input type="range" id="level" min="1" max="9" value="6" />
-            <span class="slider-val" id="level-val">6</span>
-          </div>
-          <div class="slider-labels"><span>Fast</span><span>Best</span></div>
+          <label>Compression method</label>
+          <select id="level">
+            <option value="0">Store (no compression)</option>
+            <option value="1">Fastest</option>
+            <option value="3">Fast</option>
+            <option value="6" selected>Normal</option>
+            <option value="7">Good</option>
+            <option value="9">Best</option>
+          </select>
         </div>
-
         <div class="field">
-          <label>Password <span class="muted">(optional)</span></label>
-          <input type="password" id="encrypt-pw" placeholder="AES-256 encryption" />
+          <label>Password <span class="muted">(optional — AES-256)</span></label>
+          <input type="password" id="encrypt-pw" placeholder="Leave empty for no encryption" />
         </div>
       </div>
 
       <button class="btn primary" id="compress-btn" disabled>Compress</button>
-
-      <div class="result" id="compress-result"></div>
     </div>
 
     <div class="panel" id="decompress">
@@ -60,13 +60,11 @@
       <div class="controls">
         <div class="field">
           <label>Password <span class="muted">(if encrypted)</span></label>
-          <input type="password" id="decrypt-pw" placeholder="Decryption password" />
+          <input type="password" id="decrypt-pw" placeholder="Leave empty if not encrypted" />
         </div>
       </div>
 
       <button class="btn primary" id="decompress-btn" disabled>Extract</button>
-
-      <div class="result" id="decompress-result"></div>
     </div>
 
     <div class="panel" id="analyze">
@@ -78,11 +76,30 @@
       <div class="selected-file" id="analyze-file" style="display:none"></div>
 
       <button class="btn primary" id="analyze-btn" disabled>Analyze</button>
+    </div>
 
-      <div class="result" id="analyze-result"></div>
+    <!-- PROGRESS BAR -->
+    <div class="progress-wrap" id="progress-wrap" style="display:none">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="progress-info">
+        <span id="progress-pct">0%</span>
+        <span id="progress-msg"></span>
+      </div>
     </div>
 
     <div class="status" id="status"></div>
+  </div>
+
+  <!-- MODAL POPUP -->
+  <div class="modal-overlay" id="modal" style="display:none">
+    <div class="modal">
+      <div class="modal-icon" id="modal-icon"></div>
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <button class="btn primary modal-ok" id="modal-ok">OK</button>
+    </div>
   </div>
 </body>
 </html>

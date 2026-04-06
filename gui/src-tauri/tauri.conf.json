@@ -22,11 +22,6 @@
       "csp": null
     }
   },
-  "plugins": {
-    "dialog": {
-      "all": true
-    }
-  },
   "bundle": {
     "active": true,
     "targets": "all",

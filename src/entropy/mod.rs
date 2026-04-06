@@ -114,7 +114,52 @@ fn lzma_decompress(data: &[u8]) -> Vec<u8> {
     if dec.read_to_end(&mut out).is_ok() { out } else { data.to_vec() }
 }
 
-/// Try multiple codecs and return whichever compresses smallest.
+/// Level 1-2: just LZ+ANS, one pass, no experiments. Like 7-Zip "Fastest".
+pub fn encode_fast(data: &[u8]) -> (CodecType, Vec<u8>) {
+    if data.is_empty() { return (CodecType::Raw, Vec::new()); }
+    let ent = quick_entropy(data);
+    if ent > 7.5 { return (CodecType::Raw, data.to_vec()); }
+
+    let lz = lz_encode(data);
+    if lz.len() < data.len() {
+        let lzans = ans::encode(&lz);
+        if lzans.len() < lz.len() { return (CodecType::LzAns, lzans); }
+        return (CodecType::Lz, lz);
+    }
+
+    let a = ans::encode(data);
+    if a.len() < data.len() { return (CodecType::Ans, a); }
+    (CodecType::Raw, data.to_vec())
+}
+
+/// Level 3-4: LZ + ANS + LzAns. No LZMA, no optimal parsing.
+pub fn select_fast_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
+    if data.is_empty() { return (CodecType::Raw, Vec::new()); }
+    let ent = quick_entropy(data);
+    if ent > 7.5 { return (CodecType::Raw, data.to_vec()); }
+
+    let mut best = (CodecType::Raw, data.to_vec(), data.len());
+    let try_c = |b: &mut (CodecType, Vec<u8>, usize), c: CodecType, e: Vec<u8>| {
+        if e.len() < b.2 { b.2 = e.len(); b.0 = c; b.1 = e; }
+    };
+
+    try_c(&mut best, CodecType::Ans, ans::encode(data));
+
+    let lz = lz_encode(data);
+    let lz_ok = lz.len() < data.len();
+    try_c(&mut best, CodecType::Lz, lz.clone());
+    if lz_ok { try_c(&mut best, CodecType::LzAns, ans::encode(&lz)); }
+
+    if data.len() >= 64 {
+        if let Some(o1) = order1::encode(data) {
+            try_c(&mut best, CodecType::Order1, o1);
+        }
+    }
+
+    (best.0, best.1)
+}
+
+/// Level 5+: try everything including LZMA.
 pub fn select_best_codec(data: &[u8]) -> (CodecType, Vec<u8>) {
     if data.is_empty() {
         return (CodecType::Raw, Vec::new());

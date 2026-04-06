@@ -159,44 +159,31 @@ header h1 {
   border-color: var(--accent);
 }
 
-.slider-wrap {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.slider-wrap input[type="range"] {
-  flex: 1;
-  -webkit-appearance: none;
-  height: 4px;
-  background: var(--surface2);
-  border-radius: 2px;
+.field select {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
   outline: none;
-}
-
-.slider-wrap input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--accent);
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
 }
 
-.slider-val {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--accent);
-  min-width: 20px;
-  text-align: center;
+.field select:focus {
+  border-color: var(--accent);
 }
 
-.slider-labels {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 2px;
+.field select option {
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px;
 }
 
 .btn {
@@ -264,6 +251,39 @@ header h1 {
   font-weight: 700;
 }
 
+/* Progress bar */
+.progress-wrap {
+  margin-top: 16px;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#progress-pct {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .status {
   margin-top: 16px;
   text-align: center;
@@ -282,4 +302,85 @@ header h1 {
 
 .status.success {
   color: var(--green);
+}
+
+/* Modal popup */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px 24px 20px;
+  width: 380px;
+  max-width: 90vw;
+  text-align: center;
+  animation: pop 0.15s ease-out;
+}
+
+@keyframes pop {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.modal-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+}
+
+.modal-title {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+.modal-body {
+  text-align: left;
+  margin-bottom: 20px;
+}
+
+.modal-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-row:last-child {
+  border-bottom: none;
+}
+
+.modal-row .ml {
+  color: var(--muted);
+}
+
+.modal-row .mv {
+  font-weight: 500;
+  text-align: right;
+  max-width: 60%;
+  word-break: break-all;
+}
+
+.modal-row.big .mv {
+  color: var(--green);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.modal-ok {
+  min-width: 120px;
+}
+
+.modal.error .modal-title {
+  color: #ef4444;
 }
