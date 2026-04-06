@@ -7,31 +7,37 @@ fn transform(data: &[u8], to_absolute: bool) -> Vec<u8> {
     let mut i = 0;
 
     while i + 5 <= buf.len() {
-        if buf[i] == 0xE8 || buf[i] == 0xE9 {
-            let val = i32::from_le_bytes([buf[i+1], buf[i+2], buf[i+3], buf[i+4]]);
+        // E8 = CALL, E9 = JMP
+        let is_call_jmp = buf[i] == 0xE8 || buf[i] == 0xE9;
+        // 0F 8x = conditional jump (Jcc near) — same encoding as 7-Zip BCJ
+        let is_jcc = i + 6 <= buf.len() && buf[i] == 0x0F && (buf[i+1] & 0xF0) == 0x80;
 
-            // Plausibility check is always on the absolute address
-            let abs_addr = if to_absolute {
-                val.wrapping_add(i as i32)
-            } else {
-                val // already absolute in encoded form
-            };
-
-            if abs_addr >= 0 && (abs_addr as usize) < data.len() + 65536 {
-                let converted = if to_absolute { abs_addr } else { val.wrapping_sub(i as i32) };
-                let bytes = converted.to_le_bytes();
-                buf[i+1] = bytes[0];
-                buf[i+2] = bytes[1];
-                buf[i+3] = bytes[2];
-                buf[i+4] = bytes[3];
-            }
+        if is_call_jmp {
+            convert_branch(&mut buf, i + 1, i as i32, data.len(), to_absolute);
             i += 5;
+        } else if is_jcc {
+            convert_branch(&mut buf, i + 2, (i + 2) as i32, data.len(), to_absolute);
+            i += 6;
         } else {
             i += 1;
         }
     }
 
     buf
+}
+
+fn convert_branch(buf: &mut [u8], off: usize, pc: i32, file_len: usize, to_absolute: bool) {
+    let val = i32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+    let abs_addr = if to_absolute { val.wrapping_add(pc) } else { val };
+
+    if abs_addr >= 0 && (abs_addr as usize) < file_len + 65536 {
+        let converted = if to_absolute { abs_addr } else { val.wrapping_sub(pc) };
+        let bytes = converted.to_le_bytes();
+        buf[off] = bytes[0];
+        buf[off+1] = bytes[1];
+        buf[off+2] = bytes[2];
+        buf[off+3] = bytes[3];
+    }
 }
 
 pub fn encode(data: &[u8]) -> Vec<u8> {
@@ -63,9 +69,10 @@ pub fn is_likely_executable(data: &[u8]) -> bool {
     while i + 5 <= slen {
         if data[i] == 0xE8 || data[i] == 0xE9 {
             let rel = i32::from_le_bytes([data[i+1], data[i+2], data[i+3], data[i+4]]);
-            if rel.abs() < 1_000_000 {
-                hits += 1;
-            }
+            if rel.abs() < 1_000_000 { hits += 1; }
+        } else if i + 6 <= slen && data[i] == 0x0F && (data[i+1] & 0xF0) == 0x80 {
+            let rel = i32::from_le_bytes([data[i+2], data[i+3], data[i+4], data[i+5]]);
+            if rel.abs() < 1_000_000 { hits += 1; }
         }
         total += 1;
         i += 1;

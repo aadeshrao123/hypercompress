@@ -74,7 +74,14 @@ fn lzma_preset(level: u32, data_len: usize) -> u32 {
 
 pub fn lzma_for_level(data: &[u8], level: u32) -> Vec<u8> {
     let preset = lzma_preset(level, data.len());
-    lzma_mt(data, preset).unwrap_or_else(|| lzma_st(data, preset))
+    // inside rayon threads: use ST for small data to avoid oversubscription,
+    // but allow MT for large data (solid groups need it)
+    let in_pool = rayon::current_num_threads() > 1 && rayon::current_thread_index().is_some();
+    if in_pool && data.len() < 4 * 1024 * 1024 {
+        lzma_st(data, preset)
+    } else {
+        lzma_mt(data, preset).unwrap_or_else(|| lzma_st(data, preset))
+    }
 }
 
 pub fn lzma_mt(data: &[u8], preset: u32) -> Option<Vec<u8>> {

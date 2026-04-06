@@ -123,11 +123,16 @@ pub fn compress_folder(input: &Path, output: &Path) -> io::Result<FolderStats> {
 
 fn compress_single(data: &[u8]) -> Vec<u8> {
     let level = crate::compress::get_level();
+
+    // level 3+: skip chunk pipeline for large files, go straight to LZMA
+    if level >= 3 && data.len() > 4096 {
+        return compress_single_lzma(data, level);
+    }
+
+    // level 1-2: chunk-based (fast LZ, no LZMA)
     let mut comp = Vec::new();
     let _ = crate::compress::compress(data, &mut comp);
-
-    // at level 3+, also try direct LZMA on the file (often beats chunked)
-    let mut best = if comp.len() < data.len() {
+    if comp.len() < data.len() {
         let mut buf = Vec::with_capacity(1 + comp.len());
         buf.push(0x01);
         buf.extend_from_slice(&comp);
@@ -137,18 +142,43 @@ fn compress_single(data: &[u8]) -> Vec<u8> {
         buf.push(0x00);
         buf.extend_from_slice(data);
         buf
-    };
+    }
+}
 
-    if level >= 3 && data.len() > 1024 {
-        let lzma = crate::entropy::lzma_for_level(data, level);
-        if 1 + lzma.len() < best.len() {
-            best = Vec::with_capacity(1 + lzma.len());
-            best.push(0x07); // direct LZMA marker
-            best.extend_from_slice(&lzma);
+fn compress_single_lzma(data: &[u8], level: u32) -> Vec<u8> {
+    let raw_len = 1 + data.len();
+
+    // try delta+LZMA
+    let delta = crate::transform::delta::encode(data);
+    let delta_lzma = crate::entropy::lzma_for_level(&delta, level);
+    if 1 + delta_lzma.len() < raw_len {
+        let dec = crate::entropy::decode(&delta_lzma, crate::format::CodecType::Lzma);
+        let restored = crate::transform::delta::decode(&dec);
+        if restored.len() >= data.len() && restored[..data.len()] == data[..] {
+            // at fast levels, skip raw LZMA if delta compressed well
+            if level <= 5 || delta_lzma.len() < data.len() * 70 / 100 {
+                let mut buf = Vec::with_capacity(1 + delta_lzma.len());
+                buf.push(0x08);
+                buf.extend_from_slice(&delta_lzma);
+                return buf;
+            }
         }
     }
 
-    best
+    // try raw LZMA
+    let lzma = crate::entropy::lzma_for_level(data, level);
+    if 1 + lzma.len() < raw_len {
+        let mut buf = Vec::with_capacity(1 + lzma.len());
+        buf.push(0x07);
+        buf.extend_from_slice(&lzma);
+        return buf;
+    }
+
+    // fallback: store raw
+    let mut buf = Vec::with_capacity(raw_len);
+    buf.push(0x00);
+    buf.extend_from_slice(data);
+    buf
 }
 
 fn compress_solid_group(entries: &[(String, Vec<u8>)], indices: &[usize]) -> Vec<Vec<u8>> {
@@ -192,39 +222,33 @@ fn compress_solid_group(entries: &[(String, Vec<u8>)], indices: &[usize]) -> Vec
 }
 
 fn solid_lzma(data: &[u8], level: u32) -> Vec<u8> {
-    let mut best_data = Vec::new();
-    let mut best_marker = 0u8;
-    let mut best_len = data.len();
-
-    // try delta+LZMA (audio, numeric)
+    // try delta+LZMA first (wins on audio, numeric, most binary)
     let delta = crate::transform::delta::encode(data);
     let delta_lzma = crate::entropy::lzma_for_level(&delta, level);
-    if delta_lzma.len() < best_len {
+    if delta_lzma.len() < data.len() {
         let dec = crate::entropy::decode(&delta_lzma, crate::format::CodecType::Lzma);
         let restored = crate::transform::delta::decode(&dec);
         if restored.len() >= data.len() && restored[..data.len()] == data[..] {
-            best_len = delta_lzma.len();
-            best_data = delta_lzma;
-            best_marker = 0x04;
+            // at level 1-5, don't bother trying raw LZMA if delta worked well
+            if level <= 5 || delta_lzma.len() < data.len() * 70 / 100 {
+                let mut out = Vec::with_capacity(1 + delta_lzma.len());
+                out.push(0x04);
+                out.extend_from_slice(&delta_lzma);
+                return out;
+            }
         }
     }
 
-    // try raw LZMA (always — this is what xz does)
+    // raw LZMA fallback
     let raw_lzma = crate::entropy::lzma_for_level(data, level);
-    if raw_lzma.len() < best_len {
-        best_len = raw_lzma.len();
-        best_data = raw_lzma;
-        best_marker = 0x05;
-    }
-
-    if best_marker != 0 {
-        let mut out = Vec::with_capacity(1 + best_data.len());
-        out.push(best_marker);
-        out.extend_from_slice(&best_data);
+    if raw_lzma.len() < data.len() {
+        let mut out = Vec::with_capacity(1 + raw_lzma.len());
+        out.push(0x05);
+        out.extend_from_slice(&raw_lzma);
         return out;
     }
 
-    // nothing compressed — chunk-based fallback
+    // chunk-based fallback
     let mut comp = Vec::new();
     let _ = crate::compress::compress(data, &mut comp);
     let mut out = Vec::with_capacity(1 + comp.len());
@@ -234,14 +258,15 @@ fn solid_lzma(data: &[u8], level: u32) -> Vec<u8> {
 }
 
 fn solid_cap_for_level(level: u32) -> usize {
-    // 7-Zip uses 64MB solid blocks even at level 1, 16GB at level 9.
-    // Low levels: per-file parallel for speed.
-    // High levels: solid streaming for ratio (cross-file dictionary).
+    // 7-Zip uses 64MB solid blocks even at level 1.
+    // Level 1-2: per-file parallel (speed priority, no solid overhead).
+    // Level 3+: solid groups so similar files share LZMA dictionary.
     match level {
-        0..=4 => 0,
+        0..=2 => 0,
+        3..=4 => 64 * 1024 * 1024,
         5 => 128 * 1024 * 1024,
         6 => 512 * 1024 * 1024,
-        _ => 2 * 1024 * 1024 * 1024, // 2GB
+        _ => 2 * 1024 * 1024 * 1024,
     }
 }
 
@@ -345,6 +370,10 @@ fn decompress_v2v3(data: &[u8], output_dir: &Path) -> io::Result<Vec<ArchiveEntr
             crate::decompress::decompress(&mut cursor).unwrap_or_else(|_| cd[1..].to_vec())
         } else if cd[0] == 0x07 {
             crate::entropy::decode(&cd[1..], crate::format::CodecType::Lzma)
+        } else if cd[0] == 0x08 {
+            // delta + LZMA
+            let dec = crate::entropy::decode(&cd[1..], crate::format::CodecType::Lzma);
+            crate::transform::delta::decode(&dec)
         } else if cd[0] == 0x02 {
             // solid group header
             if cd.len() < 5 { Vec::new() } else {
