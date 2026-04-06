@@ -47,6 +47,38 @@ pub fn decode(data: &[u8], codec: CodecType) -> Vec<u8> {
     }
 }
 
+/// Fast LZMA: preset 1, multithreaded. Good ratio at reasonable speed.
+pub fn lzma_fast(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    use xz2::stream::MtStreamBuilder;
+
+    if data.len() > 64 * 1024 {
+        if let Some(out) = MtStreamBuilder::new()
+            .preset(1)
+            .threads(num_cpus())
+            .encoder()
+            .ok()
+            .and_then(|s| {
+                let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), s);
+                enc.write_all(data).ok()?;
+                enc.finish().ok()
+            })
+        {
+            if out.len() < data.len() { return out; }
+        }
+    }
+
+    // fallback: single-threaded preset 1
+    use xz2::write::XzEncoder;
+    let mut enc = XzEncoder::new(Vec::new(), 1);
+    if enc.write_all(data).is_ok() {
+        if let Ok(out) = enc.finish() {
+            if out.len() < data.len() { return out; }
+        }
+    }
+    data.to_vec()
+}
+
 fn lzma_compress(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     use xz2::stream::MtStreamBuilder;

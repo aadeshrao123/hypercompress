@@ -92,8 +92,9 @@ fn compress_chunk(chunk: &Chunk, level: u32) -> CompressedChunk {
 
     match level {
         1..=2 => compress_fast(chunk, checksum),
-        3..=4 => compress_balanced(chunk, checksum),
-        5..=6 => compress_good(chunk, checksum),
+        3 => compress_balanced(chunk, checksum),
+        4..=5 => compress_normal(chunk, checksum),
+        6..=7 => compress_good(chunk, checksum),
         _ => compress_best(chunk, checksum),
     }
 }
@@ -140,7 +141,42 @@ fn verify_if_needed(original: &[u8], encoded: &[u8], tf: TransformType, codec: C
     restored.len() >= original.len() && restored[..original.len()] == original[..]
 }
 
-// Level 5-6: primary transform + no-transform, pick smaller. Verify roundtrip.
+// Level 4-5: transform + fast LZMA (preset 1, multithreaded). Like 7-Zip Normal.
+fn compress_normal(chunk: &Chunk, checksum: u32) -> CompressedChunk {
+    let tf = transform::select_transform(chunk.data_type);
+    let transformed = transform::apply_transform(&chunk.data, tf);
+
+    // use fast LZMA (preset 1) — good ratio at reasonable speed
+    let lzma_out = entropy::lzma_fast(&transformed);
+
+    if lzma_out.len() < chunk.data.len() {
+        if tf != TransformType::None {
+            let dec = entropy::decode(&lzma_out, CodecType::Lzma);
+            let restored = transform::reverse_transform(&dec, tf);
+            if restored.len() >= chunk.data.len() && restored[..chunk.data.len()] == chunk.data[..] {
+                return CompressedChunk { data: lzma_out, transform: tf, codec: CodecType::Lzma, checksum };
+            }
+        } else {
+            return CompressedChunk { data: lzma_out, transform: tf, codec: CodecType::Lzma, checksum };
+        }
+    }
+
+    // fallback: no transform + fast LZMA
+    let raw_lzma = entropy::lzma_fast(&chunk.data);
+    if raw_lzma.len() < chunk.data.len() {
+        return CompressedChunk { data: raw_lzma, transform: TransformType::None, codec: CodecType::Lzma, checksum };
+    }
+
+    // fallback: fast codecs
+    let (codec, encoded) = entropy::select_fast_codec(&chunk.data);
+    if encoded.len() < chunk.data.len() {
+        CompressedChunk { data: encoded, transform: TransformType::None, codec, checksum }
+    } else {
+        CompressedChunk { data: chunk.data.clone(), transform: TransformType::None, codec: CodecType::Raw, checksum }
+    }
+}
+
+// Level 6-7: primary transform + no-transform, pick smaller. Verify roundtrip.
 fn compress_good(chunk: &Chunk, checksum: u32) -> CompressedChunk {
     let raw_size = chunk.data.len();
     let primary = transform::select_transform(chunk.data_type);
