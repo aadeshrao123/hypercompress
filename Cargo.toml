@@ -1,3 +1,7 @@
+[workspace]
+members = ["hc_shellext"]
+exclude = ["gui"]
+
 [package]
 name = "hypercompress"
 version = "0.1.0"

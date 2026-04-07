@@ -32,9 +32,22 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "windows/shellext/HCShellExt.msix": "shellext/HCShellExt.msix",
+      "windows/shellext/HyperCompress.cer": "shellext/HyperCompress.cer",
+      "windows/shellext/install-shellext.ps1": "shellext/install-shellext.ps1",
+      "windows/shellext/uninstall-shellext.ps1": "shellext/uninstall-shellext.ps1",
+      "windows/shellext/hc_shellext.dll": "hc_shellext.dll",
+      "windows/shellext/Assets/StoreLogo.png": "Assets/StoreLogo.png",
+      "windows/shellext/Assets/Square150x150Logo.png": "Assets/Square150x150Logo.png",
+      "windows/shellext/Assets/Square44x44Logo.png": "Assets/Square44x44Logo.png",
+      "windows/shellext/Assets/Square71x71Logo.png": "Assets/Square71x71Logo.png",
+      "windows/shellext/Assets/Square310x310Logo.png": "Assets/Square310x310Logo.png"
+    },
     "windows": {
       "nsis": {
-        "installerHooks": "windows/installer-hooks.nsh"
+        "installerHooks": "windows/installer-hooks.nsh",
+        "installMode": "perMachine"
       }
     }
   }

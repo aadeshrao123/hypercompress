@@ -169,7 +169,7 @@ For folder archives at level 5+, all compressible files are sorted by type and f
 - **True solid streaming** — all compressible files in one LZMA dictionary at level 5+ (beats 7-Zip)
 - **AES-256-GCM encryption** — password protection with Argon2id key derivation
 - **Desktop GUI** — dark minimal interface built with Tauri
-- **Right-click integration** — Windows Explorer context menu
+- **Win11 modern right-click menu** — top-level "HyperCompress" entry with cascading submenu (Compress to .hc / Extract Here / Extract to subfolder / Open with HyperCompress) via a Rust COM DLL implementing `IExplorerCommand`, registered as a sparse MSIX package. Same approach used by PowerToys / NanaZip / 7-Zip / WinRAR.
 - **Built-in benchmarking** — compare against gzip, bzip2, xz with one command
 - **Cross-platform** — Linux, macOS, Windows (x86_64 and ARM64)
 - **Compression levels** — Store through Ultra, like WinRAR/7-Zip

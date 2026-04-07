@@ -61,7 +61,7 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
 
-  # Windows GUI installer (includes context menu registration)
+  # Windows GUI installer (includes Win11 modern context menu via sparse-packaged shell extension)
   gui-windows:
     runs-on: windows-latest
     steps:
@@ -71,11 +71,32 @@ jobs:
         with:
           node-version: 20
 
+      # Step 1: build the Rust COM DLL that implements IExplorerCommand
+      - name: Build hc_shellext (shell extension DLL)
+        run: cargo build -p hc_shellext --release
+
+      # Step 2: generate a fresh self-signed cert for this build.
+      # The cert ships inside the installer and is auto-trusted at install time
+      # via install-shellext.ps1 (LocalMachine\Root + LocalMachine\TrustedPeople).
+      - name: Generate self-signed code-signing cert
+        shell: pwsh
+        run: |
+          ./gui/src-tauri/windows/shellext/generate-cert.ps1 `
+            -OutDir "${{ github.workspace }}/gui/src-tauri/windows/shellext"
+
+      # Step 3: pack and sign the sparse MSIX package
+      - name: Sign sparse package
+        shell: pwsh
+        run: |
+          ./gui/src-tauri/windows/shellext/sign-package.ps1 `
+            -RepoRoot "${{ github.workspace }}"
+
       - name: Install GUI deps
         working-directory: gui
         run: npm install
 
-      - name: Build GUI
+      # Step 4: build the Tauri NSIS installer (perMachine, bundles the signed sparse package)
+      - name: Build GUI installer
         working-directory: gui
         run: npx tauri build
 

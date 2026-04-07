@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HyperCompress sparse package manifest.
+  Registers an out-of-proc COM server (hc_shellext.dll) and binds its CLSID
+  as a Windows 11 modern context menu handler for files, folders, and .hc archives.
+
+  Sparse packages let a Win32 installer (NSIS in our case) drop the manifest
+  into Program Files and register it via Add-AppxPackage with -ExternalLocation,
+  without restructuring the whole app as MSIX. Microsoft docs:
+    https://learn.microsoft.com/windows/apps/desktop/modernize/grant-identity-to-nonpackaged-apps
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  IgnorableNamespaces="uap uap10 rescap com desktop desktop4 desktop5">
+
+  <Identity Name="HyperCompress.ShellExtension"
+            Publisher="CN=HyperCompress"
+            Version="0.1.0.1"
+            ProcessorArchitecture="x64"/>
+
+  <Properties>
+    <DisplayName>HyperCompress Shell Extension</DisplayName>
+    <PublisherDisplayName>HyperCompress</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0"/>
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+
+  <Applications>
+    <Application Id="HyperCompressShellExt"
+                 Executable="gui.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="HyperCompress"
+        Description="Content-aware compression"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        AppListEntry="none">
+        <uap:DefaultTile Square71x71Logo="Assets\Square71x71Logo.png"
+                         ShortName="HyperCompress"/>
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- Step 1: register the COM in-proc server. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="HyperCompress Shell Extension">
+              <com:Class Id="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+                         Path="hc_shellext.dll"
+                         ThreadingModel="STA"/>
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- Step 2: bind that CLSID as a top-level Win11 context menu handler.
+             Type="*" covers ALL files including .hc, so we don't add a separate
+             .hc entry — that would register the same handler twice and produce
+             duplicate menu items on .hc files. Conditional show/hide for compress
+             vs extract is done at runtime in IExplorerCommand::GetState. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="HCRoot" Clsid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"/>
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="HCRoot" Clsid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"/>
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="HCRoot" Clsid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"/>
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust"/>
+  </Capabilities>
+</Package>
