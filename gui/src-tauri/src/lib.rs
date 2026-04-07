@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use std::io::Cursor;
-use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Serialize, Clone)]
@@ -65,63 +65,47 @@ fn compress_folder_with_progress(
     app: &AppHandle, input: &PathBuf, out: &PathBuf,
     has_pw: bool, password: &str, orig_path: &str,
 ) -> Result<CompressResult, String> {
-    // gather all files
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    collect_dir(input, input, &mut files);
-    let total = files.len();
-    let total_bytes: u64 = files.iter().map(|(_, d)| d.len() as u64).sum();
+    // Estimate total bytes for the progress tick
+    let mut total_bytes: u64 = 0;
+    let mut file_count: usize = 0;
+    for_each_file(input, &mut |_, sz| { total_bytes += sz; file_count += 1; });
 
-    emit(app, 0.0, &format!("0/{} files", total));
+    emit(app, 2.0, &format!("Compressing {} files...", file_count));
 
-    // compress each file individually with progress
-    let mut compressed: Vec<(String, u64, Vec<u8>)> = Vec::new();
-    let mut processed_bytes = 0u64;
+    // Spawn a timer thread that reports smooth progress while archive::compress_folder
+    // runs (it doesn't expose granular callbacks because it parallelises across files
+    // and runs LZMA in solid streams).
+    let done = Arc::new(AtomicBool::new(false));
+    let done2 = done.clone();
+    let app2 = app.clone();
+    let lvl = hypercompress::compress::get_level();
+    // rough throughput estimate per level for the test folder
+    let speed_mbps = match lvl { 1..=2 => 200.0, 3..=4 => 30.0, 5..=6 => 12.0, 7..=8 => 4.0, _ => 2.5 };
+    let est_secs = (total_bytes as f64 / 1_000_000.0) / speed_mbps;
 
-    for (i, (rel, data)) in files.iter().enumerate() {
-        let pct = (i as f64 / total as f64) * 85.0;
-        emit(app, pct, &format!("{}/{} — {}", i + 1, total, rel.split('/').last().unwrap_or(rel)));
-
-        let orig_sz = data.len() as u64;
-        let mut comp = Vec::new();
-        let _ = hypercompress::compress::compress(data, &mut comp);
-
-        if comp.len() < data.len() {
-            let mut buf = Vec::with_capacity(1 + comp.len());
-            buf.push(0x01);
-            buf.extend_from_slice(&comp);
-            compressed.push((rel.clone(), orig_sz, buf));
-        } else {
-            let mut buf = Vec::with_capacity(1 + data.len());
-            buf.push(0x00);
-            buf.extend_from_slice(data);
-            compressed.push((rel.clone(), orig_sz, buf));
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        loop {
+            if done2.load(Ordering::Relaxed) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let elapsed = start.elapsed().as_secs_f64();
+            let raw = if est_secs > 0.0 { elapsed / est_secs } else { 0.9 };
+            let pct = (5.0 + 85.0 * (1.0 - (-2.0 * raw).exp())).min(90.0);
+            let remaining = (est_secs - elapsed).max(0.0);
+            let msg = if remaining > 1.0 {
+                format!("Compressing... ~{}s remaining", remaining.ceil() as u32)
+            } else {
+                "Compressing...".to_string()
+            };
+            let _ = app2.emit("progress", Progress { pct, msg });
         }
-        processed_bytes += orig_sz;
-    }
+    });
 
-    emit(app, 88.0, "Writing archive...");
-
-    // write archive in HCAR v3 format
-    let file = std::fs::File::create(out).map_err(|e| format!("Cannot create: {}", e))?;
-    let mut w = std::io::BufWriter::new(file);
-    use std::io::Write;
-
-    w.write_all(b"HCAR").map_err(|e| e.to_string())?;
-    w.write_all(&3u16.to_le_bytes()).map_err(|e| e.to_string())?;
-    w.write_all(&(compressed.len() as u32).to_le_bytes()).map_err(|e| e.to_string())?;
-
-    for (rel, orig, comp) in &compressed {
-        let pb = rel.as_bytes();
-        w.write_all(&(pb.len() as u16).to_le_bytes()).map_err(|e| e.to_string())?;
-        w.write_all(pb).map_err(|e| e.to_string())?;
-        w.write_all(&orig.to_le_bytes()).map_err(|e| e.to_string())?;
-        w.write_all(&(comp.len() as u64).to_le_bytes()).map_err(|e| e.to_string())?;
-    }
-    for (_, _, comp) in &compressed {
-        w.write_all(comp).map_err(|e| e.to_string())?;
-    }
-    w.flush().map_err(|e| e.to_string())?;
-    drop(w);
+    // The actual compression — uses solid streaming, multi-threaded LZMA, the works.
+    let stats = hypercompress::archive::compress_folder(input, out)
+        .map_err(|e| format!("Compression failed: {}", e));
+    done.store(true, Ordering::Relaxed);
+    let stats = stats?;
 
     if has_pw {
         emit(app, 93.0, "Encrypting...");
@@ -130,14 +114,32 @@ fn compress_folder_with_progress(
         std::fs::write(out, &enc).map_err(|e| e.to_string())?;
     }
 
-    let final_size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    let final_size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(stats.archive_size);
     emit(app, 100.0, "Done!");
 
     Ok(CompressResult {
-        input_path: orig_path.to_string(), output_path: out.to_string_lossy().to_string(),
-        original_size: total_bytes, compressed_size: final_size,
-        ratio: total_bytes as f64 / final_size.max(1) as f64, encrypted: has_pw,
+        input_path: orig_path.to_string(),
+        output_path: out.to_string_lossy().to_string(),
+        original_size: stats.total_original,
+        compressed_size: final_size,
+        ratio: stats.total_original as f64 / final_size.max(1) as f64,
+        encrypted: has_pw,
     })
+}
+
+fn for_each_file<F: FnMut(&std::path::Path, u64)>(dir: &std::path::Path, cb: &mut F) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                for_each_file(&p, cb);
+            } else if p.is_file() {
+                if let Ok(meta) = e.metadata() {
+                    cb(&p, meta.len());
+                }
+            }
+        }
+    }
 }
 
 fn compress_single_with_progress(
@@ -280,19 +282,6 @@ fn get_startup_args() -> StartupArgs {
     let a: Vec<String> = std::env::args().collect();
     if a.len() >= 3 { StartupArgs { action: a[1].clone(), path: a[2].clone() } }
     else { StartupArgs { action: String::new(), path: String::new() } }
-}
-
-fn collect_dir(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() { collect_dir(base, &p, out); }
-            else if p.is_file() {
-                let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().replace('\\', "/");
-                if let Ok(data) = std::fs::read(&p) { out.push((rel, data)); }
-            }
-        }
-    }
 }
 
 fn bg<F, T>(f: F) -> T where F: FnOnce() -> T + Send + 'static, T: Send + 'static {

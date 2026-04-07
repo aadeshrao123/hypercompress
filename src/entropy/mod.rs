@@ -72,10 +72,15 @@ fn zstd_decompress(data: &[u8]) -> Vec<u8> {
         .unwrap_or_else(|_| data.to_vec())
 }
 
+// liblzma extreme flag — adds nice_len=273, depth=999, and bigger dict to a preset.
+// Equivalent to xz -e flag, ~1-3% better ratio at significant CPU cost.
+// 7-Zip Ultra (-mx9) uses an equivalent setting internally.
+const LZMA_PRESET_EXTREME: u32 = 0x80000000;
+
 // LZMA preset mapping.
-// Levels 1-4: cap preset on large data for speed (user wants fast).
-// Levels 5+: no cap — user chose slow mode, give them full power.
-// 7-Zip at level 9 uses dict=512MB. xz -9 uses dict=64MB (preset 9).
+// Levels 1-4: cap preset on large data for speed.
+// Levels 5+:  no cap — user chose slow mode, give them full power.
+// Level 9:    add EXTREME flag to match 7-Zip Ultra.
 fn lzma_preset(level: u32, data_len: usize) -> u32 {
     let base = match level {
         0..=2 => 1,
@@ -87,11 +92,13 @@ fn lzma_preset(level: u32, data_len: usize) -> u32 {
         8 => 7,
         _ => 9,
     };
-    // only cap at speed-focused levels (1-4)
     if level <= 4 {
-        if data_len > 32 * 1024 * 1024 { base.min(2) }
-        else if data_len > 8 * 1024 * 1024 { base.min(3) }
-        else { base }
+        let capped = if data_len > 32 * 1024 * 1024 { base.min(2) }
+                     else if data_len > 8 * 1024 * 1024 { base.min(3) }
+                     else { base };
+        capped
+    } else if level >= 9 {
+        base | LZMA_PRESET_EXTREME
     } else {
         base
     }
@@ -99,6 +106,18 @@ fn lzma_preset(level: u32, data_len: usize) -> u32 {
 
 pub fn lzma_for_level(data: &[u8], level: u32) -> Vec<u8> {
     let preset = lzma_preset(level, data.len());
+
+    // Level 9 + large solid blob: use a single-threaded encoder with a
+    // dictionary sized to fit the entire stream. xz preset 9 caps dict at
+    // 64 MB, so on a 188 MB solid stream the dict only sees the last 64 MB
+    // at any time. Going ST + custom dict_size loses MT speedup but wins
+    // ~0.5% ratio on large solid blobs.
+    if level >= 9 && data.len() > 32 * 1024 * 1024 {
+        if let Some(out) = lzma_oversized_dict(data) {
+            return out;
+        }
+    }
+
     // inside rayon threads: use ST for small data to avoid oversubscription,
     // but allow MT for large data (solid groups need it)
     let in_pool = rayon::current_num_threads() > 1 && rayon::current_thread_index().is_some();
@@ -107,6 +126,32 @@ pub fn lzma_for_level(data: &[u8], level: u32) -> Vec<u8> {
     } else {
         lzma_mt(data, preset).unwrap_or_else(|| lzma_st(data, preset))
     }
+}
+
+/// Single-threaded LZMA with a dictionary sized to fit the data (capped at 1.5 GB).
+/// Used for level-9 solid blobs where ratio matters more than wall time.
+fn lzma_oversized_dict(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    use xz2::stream::{Filters, LzmaOptions, Stream};
+
+    // round dict_size to the next power of 2, capped at 1.5 GiB (xz max).
+    let want = data.len().next_power_of_two().max(64 * 1024 * 1024);
+    let dict_size = want.min(1_536 * 1024 * 1024) as u32;
+
+    let mut opts = LzmaOptions::new_preset(9 | LZMA_PRESET_EXTREME).ok()?;
+    opts.dict_size(dict_size);
+    // 7-Zip Ultra defaults: lc=3 lp=0 pb=2
+    opts.literal_context_bits(3);
+    opts.literal_position_bits(0);
+    opts.position_bits(2);
+
+    let mut filters = Filters::new();
+    filters.lzma2(&opts);
+    let stream = Stream::new_stream_encoder(&filters, xz2::stream::Check::Crc64).ok()?;
+    let mut enc = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
+    enc.write_all(data).ok()?;
+    let out = enc.finish().ok()?;
+    if out.len() < data.len() { Some(out) } else { None }
 }
 
 pub fn lzma_mt(data: &[u8], preset: u32) -> Option<Vec<u8>> {
